@@ -102,3 +102,34 @@
   color: var(--text-main);
   font-family: 'Courier New', monospace; /* Monospace for alignment */
 }
+
+.captures-container {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  margin-bottom: 10px;
+}
+
+.capture-row {
+  display: flex;
+  align-items: center;
+  font-size: 0.9em;
+  color: var(--text-muted);
+}
+
+.piece-icon {
+  font-size: 1.2em;
+  margin-left: 2px;
+}
+
+.white-piece {
+  color: #fff;
+  text-shadow: 0 0 2px #000;
+}
+
+.black-piece {
+  color: #000;
+  text-shadow: 0 0 2px #fff; 
+}

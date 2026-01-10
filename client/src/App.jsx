@@ -6,12 +6,41 @@ import './App.css'
 
 const API_Base = 'http://localhost:8001/api'
 
+// Simple mapping for text-based icons or use images
+const getPieceIcon = (pieceChar) => {
+  const icons = {
+    p: '♟', n: '♞', b: '♝', r: '♜', q: '♛', k: '♚'
+  }
+  return icons[pieceChar] || pieceChar
+}
+
 function App() {
   const [game, setGame] = useState(new Chess())
   const [gameId, setGameId] = useState(null)
   const [fen, setFen] = useState(game.fen())
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState("Select a mode to start")
+
+  // Helper to count captured pieces
+  const getCapturedPieces = () => {
+    const history = game.history({ verbose: true })
+    const captured = { w: [], b: [] } // w: pieces captured BY white (so black pieces)
+
+    for (const move of history) {
+      if (move.captured) {
+        // move.color is who moved. If 'w' moved and captured, it captured a black piece ('b')
+        // But store based on who captured it? Usually we show "White's captures" (black pieces)
+        if (move.color === 'w') {
+          captured.w.push(move.captured)
+        } else {
+          captured.b.push(move.captured)
+        }
+      }
+    }
+    return captured
+  }
+
+  const captures = getCapturedPieces()
 
   // Start a new game
   const startGame = async (blackPlayerType) => {
@@ -158,8 +187,20 @@ function App() {
           />
         </div>
 
-        {/* Right Panel: Move History */}
+        {/* Right Panel: Move History & Captures */}
         <div className="glass-panel info-panel">
+          <h3>Captures</h3>
+          <div className="captures-container">
+            <div className="capture-row">
+              <span>White: </span>
+              {captures.w.map((p, i) => <span key={i} className={`piece-icon black-piece`}>{getPieceIcon(p)}</span>)}
+            </div>
+            <div className="capture-row">
+              <span>Black: </span>
+              {captures.b.map((p, i) => <span key={i} className={`piece-icon white-piece`}>{getPieceIcon(p)}</span>)}
+            </div>
+          </div>
+
           <h3>Move History</h3>
           <div className="history-container">
             <table className="history-table">
