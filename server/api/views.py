@@ -29,9 +29,15 @@ class GameViewSet(viewsets.ModelViewSet):
         except ValueError:
              return Response({"error": "Invalid UCI format"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if move not in board.legal_moves:
-             return Response({"error": "Illegal move"}, status=status.HTTP_400_BAD_REQUEST)
-             
+        # Generate SAN before pushing (context matters)
+        san = board.san(move)
+        
+        # Update PGN logic
+        if board.turn == chess.WHITE:
+            game.pgn += f"{board.fullmove_number}. {san} "
+        else:
+            game.pgn += f"{san} "
+
         # Apply Human Move
         board.push(move)
         self._update_game_state(game, board)
@@ -41,8 +47,6 @@ class GameViewSet(viewsets.ModelViewSet):
             return Response(GameSerializer(game).data)
             
         # Check if opponent is AI and it's their turn
-        # Assume Human is White for now, or check game.white_player_type
-        # Simple logic: If turn is Black and black_player_type != 'human'
         if board.turn == chess.BLACK and game.black_player_type == 'stockfish':
              self._make_stockfish_move(game, board)
         
@@ -50,7 +54,7 @@ class GameViewSet(viewsets.ModelViewSet):
 
     def _update_game_state(self, game, board):
         game.fen = board.fen()
-        # game.pgn = ... # Update PGN later
+        # game.pgn is updated in the move() method logic now
         if board.is_game_over():
             game.is_game_over = True
             game.winner = self._get_winner(board)
@@ -69,6 +73,13 @@ class GameViewSet(viewsets.ModelViewSet):
             move = player.get_move(board)
             player.close()
             
+            # Update PGN for AI
+            san = board.san(move)
+            if board.turn == chess.WHITE:
+                game.pgn += f"{board.fullmove_number}. {san} "
+            else:
+                game.pgn += f"{san} "
+
             board.push(move)
             self._update_game_state(game, board)
         except Exception as e:
