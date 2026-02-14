@@ -8,6 +8,27 @@ const API_BASE = 'http://localhost:8001/api'
 
 const PROMOTION_OPTIONS = ['q', 'r', 'b', 'n']
 
+const OPPONENT_PROFILE = {
+  human: {
+    title: 'Human Opponent',
+    details: ['Another player controls the black pieces.'],
+  },
+  stockfish: {
+    title: 'Stockfish Engine',
+    details: [
+      'Engine: Stockfish (UCI)',
+      'Runtime: Local server binary',
+      'Strength profile: ~0.5s search per move',
+    ],
+  },
+}
+
+const getOpponentProfile = (blackPlayerType) =>
+  OPPONENT_PROFILE[blackPlayerType] || {
+    title: blackPlayerType || 'Unknown Opponent',
+    details: ['No additional details available.'],
+  }
+
 const getPieceIcon = (pieceChar) => {
   const icons = {
     p: '♟',
@@ -55,6 +76,7 @@ function App() {
   const [pendingPromotion, setPendingPromotion] = useState(null)
   const [isSubmittingMove, setIsSubmittingMove] = useState(false)
   const [moveError, setMoveError] = useState(null)
+  const [opponentProfile, setOpponentProfile] = useState(null)
 
   const gameRef = useRef(game)
   const gameIdRef = useRef(gameId)
@@ -105,6 +127,7 @@ function App() {
   const hydrateFromServer = (gameData) => {
     const nextGame = createGameFromServer(gameData)
     syncLocalGame(nextGame)
+    setOpponentProfile(getOpponentProfile(gameData.black_player_type))
 
     if (gameData.is_game_over) {
       setStatus(`Game Over! Winner: ${gameData.winner}`)
@@ -352,6 +375,16 @@ function App() {
             </button>
           </div>
           <div className="status">{status}</div>
+          {opponentProfile ? (
+            <div className="opponent-info">
+              <div className="opponent-title">{opponentProfile.title}</div>
+              {opponentProfile.details.map((detail) => (
+                <div key={detail} className="opponent-detail">
+                  {detail}
+                </div>
+              ))}
+            </div>
+          ) : null}
           {moveError ? <div className="status error-status">{moveError}</div> : null}
           {isSubmittingMove ? <div className="status info-status">Submitting move...</div> : null}
         </div>
