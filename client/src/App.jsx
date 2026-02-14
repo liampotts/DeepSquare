@@ -7,6 +7,36 @@ import './App.css'
 const API_BASE = 'http://localhost:8001/api'
 
 const PROMOTION_OPTIONS = ['q', 'r', 'b', 'n']
+const STOCKFISH_ESTIMATED_ELO = '~2500 (0.5s/move)'
+const PIECE_VALUES = {
+  p: 1,
+  n: 3,
+  b: 3,
+  r: 5,
+  q: 9,
+  k: 0,
+}
+
+const OPPONENT_PROFILE = {
+  human: {
+    title: 'Human Opponent',
+    details: ['Another player controls the black pieces.'],
+  },
+  stockfish: {
+    title: 'Stockfish Engine',
+    details: [
+      'Engine: Stockfish (UCI)',
+      'Runtime: Local server binary',
+      'Strength profile: ~0.5s search per move',
+    ],
+  },
+}
+
+const getOpponentProfile = (blackPlayerType) =>
+  OPPONENT_PROFILE[blackPlayerType] || {
+    title: blackPlayerType || 'Unknown Opponent',
+    details: ['No additional details available.'],
+  }
 
 const getPieceIcon = (pieceChar) => {
   const icons = {
@@ -18,6 +48,29 @@ const getPieceIcon = (pieceChar) => {
     k: '♚',
   }
   return icons[pieceChar] || pieceChar
+}
+
+const getMaterialScore = (chessGame) => {
+  const board = chessGame.board()
+  let score = 0
+
+  for (const row of board) {
+    for (const square of row) {
+      if (!square) continue
+      const value = PIECE_VALUES[square.type] || 0
+      score += square.color === 'w' ? value : -value
+    }
+  }
+
+  return score
+}
+
+const getPositionStrengthLabel = (score) => {
+  if (score >= 3) return `White clearly better (+${score})`
+  if (score >= 1) return `White slightly better (+${score})`
+  if (score <= -3) return `Black clearly better (${score})`
+  if (score <= -1) return `Black slightly better (${score})`
+  return 'Roughly equal (0)'
 }
 
 const createGameFromSnapshot = (snapshot) => {
@@ -55,6 +108,7 @@ function App() {
   const [pendingPromotion, setPendingPromotion] = useState(null)
   const [isSubmittingMove, setIsSubmittingMove] = useState(false)
   const [moveError, setMoveError] = useState(null)
+  const [opponentProfile, setOpponentProfile] = useState(null)
 
   const gameRef = useRef(game)
   const gameIdRef = useRef(gameId)
@@ -105,6 +159,7 @@ function App() {
   const hydrateFromServer = (gameData) => {
     const nextGame = createGameFromServer(gameData)
     syncLocalGame(nextGame)
+    setOpponentProfile(getOpponentProfile(gameData.black_player_type))
 
     if (gameData.is_game_over) {
       setStatus(`Game Over! Winner: ${gameData.winner}`)
@@ -296,6 +351,11 @@ function App() {
     return rows
   }, [game])
 
+  const positionStrength = useMemo(() => {
+    const score = getMaterialScore(game)
+    return getPositionStrengthLabel(score)
+  }, [game])
+
   const squareStyles = useMemo(() => {
     const styles = {}
 
@@ -352,6 +412,20 @@ function App() {
             </button>
           </div>
           <div className="status">{status}</div>
+          {opponentProfile ? (
+            <div className="opponent-info">
+              <div className="opponent-title">{opponentProfile.title}</div>
+              {opponentProfile.details.map((detail) => (
+                <div key={detail} className="opponent-detail">
+                  {detail}
+                </div>
+              ))}
+              {opponentProfile.title === 'Stockfish Engine' ? (
+                <div className="opponent-metric">Estimated Elo: {STOCKFISH_ESTIMATED_ELO}</div>
+              ) : null}
+              <div className="opponent-metric">Position strength: {positionStrength}</div>
+            </div>
+          ) : null}
           {moveError ? <div className="status error-status">{moveError}</div> : null}
           {isSubmittingMove ? <div className="status info-status">Submitting move...</div> : null}
         </div>

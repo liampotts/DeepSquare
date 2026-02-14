@@ -77,6 +77,32 @@
   gap: 0.5rem;
 }
 
+.opponent-info {
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.opponent-title {
+  font-weight: 700;
+  color: #d4f3ff;
+  font-size: 0.95rem;
+}
+
+.opponent-detail {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.opponent-metric {
+  margin-top: 0.2rem;
+  color: #f2e4a3;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
 .history-container {
   overflow-y: auto;
   max-height: 400px;
