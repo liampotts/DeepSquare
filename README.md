@@ -60,6 +60,65 @@ npm run dev
 
 Frontend URL: `http://localhost:5173`
 
+## Self-Hosted Deployment (Docker Compose)
+
+This repo now includes:
+- `/Users/liampotts/DeepSquare/docker-compose.yml`
+- `/Users/liampotts/DeepSquare/server/Dockerfile`
+- `/Users/liampotts/DeepSquare/client/Dockerfile`
+- `/Users/liampotts/DeepSquare/client/nginx/default.conf`
+- `/Users/liampotts/DeepSquare/.env.production.example`
+
+### 1. Prepare production env
+
+```bash
+cp .env.production.example .env.production
+```
+
+Edit `.env.production` with your real values:
+- `SECRET_KEY`
+- `ALLOWED_HOSTS`
+- `CSRF_TRUSTED_ORIGINS`
+- `POSTGRES_PASSWORD`
+- Optional LLM provider keys
+
+### 2. Start app stack
+
+```bash
+docker compose --env-file .env.production up -d --build
+```
+
+This starts:
+- `db` (Postgres)
+- `api` (Django + Gunicorn + Stockfish)
+- `web` (Nginx serving React build and proxying `/api` to Django)
+
+App URL: `http://<your-host>`
+
+### 3. Start local-model serving (optional)
+
+If you want local models in production:
+
+```bash
+docker compose --env-file .env.production --profile local-llm up -d ollama
+```
+
+Then pull your model into Ollama:
+
+```bash
+docker exec -it $(docker compose --env-file .env.production ps -q ollama) ollama pull qwen3:8b
+```
+
+Set in `.env.production`:
+- `LOCAL_LLM_ENABLED=true`
+- `LOCAL_LLM_BASE_URL=http://ollama:11434`
+- `LLM_ALLOWED_MODELS_LOCAL=qwen3:8b,llama3.1:8b`
+
+### 4. Production TLS
+
+Compose here binds plain HTTP on `WEB_PORT` (default `80`).  
+For internet-facing deploys, terminate TLS with Caddy/Nginx/Traefik in front and forward to this stack.
+
 ## LLM Configuration (Backend)
 
 The backend reads these environment variables from your shell:
@@ -258,6 +317,14 @@ When FastAPI could make sense later:
 - sustained high analysis traffic,
 - need for a dedicated async analysis worker service,
 - desire to split analysis into an independently scalable API process.
+
+## Fine-Tuned Local Models Roadmap
+
+For your long-term model battle setup:
+- Keep self-host inference behind one local endpoint (`ollama` now, vLLM later if needed).
+- Register each fine-tuned model ID in `LLM_ALLOWED_MODELS_LOCAL`.
+- Add model-vs-model mode by extending `white_player_type`/`white_player_config` similarly to black.
+- Run automated match batches and compute Elo/Glicko from results.
 
 ## Tests
 
