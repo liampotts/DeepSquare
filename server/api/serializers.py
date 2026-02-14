@@ -2,6 +2,7 @@ from rest_framework import serializers
 from .models import Game
 import chess
 
+
 class GameSerializer(serializers.ModelSerializer):
     legal_moves = serializers.SerializerMethodField()
 
@@ -15,5 +16,12 @@ class GameSerializer(serializers.ModelSerializer):
             return []
         return [move.uci() for move in board.legal_moves]
 
+
 class MoveSerializer(serializers.Serializer):
-    move_uci = serializers.CharField(max_length=5)
+    move_uci = serializers.RegexField(
+        regex=r'^[a-h][1-8][a-h][1-8][qrbn]?$',
+        max_length=5,
+        error_messages={
+            'invalid': 'Move must be valid UCI format: e2e4 or e7e8q.',
+        },
+    )
