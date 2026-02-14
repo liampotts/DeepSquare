@@ -15,6 +15,11 @@ from .players.openai_client import OpenAIClient
 from .players.anthropic_client import AnthropicClient
 from .players.gemini_client import GeminiClient
 from .players.local_client import LocalClient
+from .analysis import (
+    AnalysisTooShortError,
+    AnalysisUnavailableError,
+    GameAnalysisService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +142,41 @@ class GameViewSet(viewsets.ModelViewSet):
                 )
 
         return Response(GameSerializer(game).data)
+
+    @action(detail=True, methods=['get'])
+    def analysis(self, request, pk=None):
+        game = self.get_object()
+
+        if not settings.ANALYSIS_FEATURE_ENABLED:
+            return Response(
+                {"error": "Analysis engine unavailable", "code": "analysis_unavailable"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        try:
+            analysis_service = GameAnalysisService()
+            payload = analysis_service.analyze_game(game)
+            return Response(payload)
+        except AnalysisTooShortError as exc:
+            return Response(
+                {
+                    "error": "Not enough moves to analyze",
+                    "code": "analysis_too_short",
+                    "min_plies": exc.min_plies,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except AnalysisUnavailableError:
+            return Response(
+                {"error": "Analysis engine unavailable", "code": "analysis_unavailable"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception:
+            logger.exception('analysis_failed game_id=%s', game.id)
+            return Response(
+                {"error": "Failed to analyze game", "code": "analysis_failed"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
     def _update_game_state(self, game, board):
         game.fen = board.fen()

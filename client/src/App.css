@@ -77,6 +77,27 @@
   gap: 0.5rem;
 }
 
+.analysis-controls {
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.analysis-hint {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.analyze-button {
+  width: 100%;
+}
+
+.analysis-error {
+  margin-top: -0.2rem;
+}
+
 .llm-config {
   border-top: 1px solid rgba(255, 255, 255, 0.15);
   padding-top: 0.75rem;
@@ -260,6 +281,119 @@
   cursor: pointer;
 }
 
+.analysis-panel {
+  margin-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  padding-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.analysis-panel h3,
+.analysis-panel h4 {
+  margin: 0;
+}
+
+.analysis-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.analysis-card {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  padding: 0.6rem;
+  background: rgba(255, 255, 255, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.analysis-card-title {
+  color: #d4f3ff;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.analysis-elo {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #f2e4a3;
+}
+
+.analysis-metric {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.analysis-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.analysis-item {
+  border-left: 4px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+}
+
+.analysis-item.inaccuracy {
+  border-left-color: #f2d785;
+}
+
+.analysis-item.mistake {
+  border-left-color: #f5a56b;
+}
+
+.analysis-item.blunder {
+  border-left-color: #f26b6b;
+}
+
+.analysis-item.best {
+  border-left-color: #6bcf8a;
+}
+
+.analysis-item.turning-point {
+  border-left-color: #8fc9ff;
+}
+
+.analysis-item-title {
+  font-size: 0.86rem;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.analysis-item-meta {
+  color: #d5dce8;
+  font-size: 0.77rem;
+}
+
+.analysis-item-copy {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.analysis-summary {
+  margin: 0;
+  color: #e4edf7;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.analysis-note {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.analysis-empty {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
 @media (max-width: 1100px) {
   .game-layout {
     flex-direction: column;
@@ -269,5 +403,9 @@
   .controls-panel,
   .info-panel {
     width: min(600px, 90vw);
+  }
+
+  .analysis-card-grid {
+    grid-template-columns: 1fr;
   }
 }
