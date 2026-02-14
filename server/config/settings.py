@@ -147,6 +147,8 @@ LLM_FEATURE_ENABLED = _parse_bool(os.getenv('LLM_FEATURE_ENABLED'), True)
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+LOCAL_LLM_ENABLED = _parse_bool(os.getenv('LOCAL_LLM_ENABLED'), True)
+LOCAL_LLM_BASE_URL = os.getenv('LOCAL_LLM_BASE_URL', 'http://127.0.0.1:11434').rstrip('/')
 
 LLM_ALLOWED_MODELS_OPENAI = _parse_csv(
     os.getenv('LLM_ALLOWED_MODELS_OPENAI'),
@@ -159,6 +161,10 @@ LLM_ALLOWED_MODELS_ANTHROPIC = _parse_csv(
 LLM_ALLOWED_MODELS_GEMINI = _parse_csv(
     os.getenv('LLM_ALLOWED_MODELS_GEMINI'),
     ['gemini-1.5-pro', 'gemini-1.5-flash'],
+)
+LLM_ALLOWED_MODELS_LOCAL = _parse_csv(
+    os.getenv('LLM_ALLOWED_MODELS_LOCAL'),
+    ['llama3.1:8b'],
 )
 
 LLM_ADVANCED_CUSTOM_MODEL_ENABLED = _parse_bool(

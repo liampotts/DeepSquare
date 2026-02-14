@@ -6,7 +6,7 @@ import chess
 
 class GameSerializer(serializers.ModelSerializer):
     legal_moves = serializers.SerializerMethodField()
-    SUPPORTED_PROVIDERS = {'openai', 'anthropic', 'gemini'}
+    SUPPORTED_PROVIDERS = {'openai', 'anthropic', 'gemini', 'local'}
 
     class Meta:
         model = Game
@@ -62,9 +62,12 @@ class GameSerializer(serializers.ModelSerializer):
                 {'error': 'Unsupported LLM provider', 'code': 'llm_provider_invalid'}
             )
 
-        if not self._provider_has_key(provider):
+        if not self._provider_is_configured(provider):
+            error_message = 'Provider API key is not configured'
+            if provider == 'local':
+                error_message = 'Local LLM provider is not enabled on this server'
             raise serializers.ValidationError(
-                {'error': 'Provider API key is not configured', 'code': 'llm_provider_not_configured'}
+                {'error': error_message, 'code': 'llm_provider_not_configured'}
             )
 
         if not model:
@@ -90,13 +93,15 @@ class GameSerializer(serializers.ModelSerializer):
         }
         return attrs
 
-    def _provider_has_key(self, provider):
+    def _provider_is_configured(self, provider):
         if provider == 'openai':
             return bool(settings.OPENAI_API_KEY)
         if provider == 'anthropic':
             return bool(settings.ANTHROPIC_API_KEY)
         if provider == 'gemini':
             return bool(settings.GEMINI_API_KEY)
+        if provider == 'local':
+            return bool(settings.LOCAL_LLM_ENABLED)
         return False
 
     def _allowed_models(self, provider):
@@ -106,6 +111,8 @@ class GameSerializer(serializers.ModelSerializer):
             return settings.LLM_ALLOWED_MODELS_ANTHROPIC
         if provider == 'gemini':
             return settings.LLM_ALLOWED_MODELS_GEMINI
+        if provider == 'local':
+            return settings.LLM_ALLOWED_MODELS_LOCAL
         return []
 
 

@@ -11,6 +11,7 @@ from .players.llm_player import LLMPlayer
 from .players.openai_client import OpenAIClient
 from .players.anthropic_client import AnthropicClient
 from .players.gemini_client import GeminiClient
+from .players.local_client import LocalClient
 
 
 class FakeLLMClient:
@@ -26,9 +27,11 @@ class FakeLLMClient:
     OPENAI_API_KEY='test-openai-key',
     ANTHROPIC_API_KEY='test-anthropic-key',
     GEMINI_API_KEY='test-gemini-key',
+    LOCAL_LLM_ENABLED=True,
     LLM_ALLOWED_MODELS_OPENAI=['gpt-4.1-mini'],
     LLM_ALLOWED_MODELS_ANTHROPIC=['claude-3-5-sonnet-latest'],
     LLM_ALLOWED_MODELS_GEMINI=['gemini-1.5-pro'],
+    LLM_ALLOWED_MODELS_LOCAL=['llama3.1:8b'],
     LLM_ADVANCED_CUSTOM_MODEL_ENABLED=True,
 )
 class GameApiTests(APITestCase):
@@ -148,6 +151,17 @@ class GameApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data['code'], 'llm_provider_invalid')
 
+    def test_create_llm_game_with_local_provider_model(self):
+        response = self.client.post(
+            reverse('game-list'),
+            self.create_llm_game_payload(provider='local', model='llama3.1:8b'),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['black_player_type'], 'llm')
+        self.assertEqual(response.data['black_player_config']['provider'], 'local')
+        self.assertEqual(response.data['black_player_config']['model'], 'llama3.1:8b')
+
     def test_non_allowlisted_model_rejected_without_custom_override(self):
         response = self.client.post(
             reverse('game-list'),
@@ -180,13 +194,30 @@ class GameApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data['code'], 'llm_provider_not_configured')
 
+    @override_settings(LOCAL_LLM_ENABLED=False)
+    def test_local_provider_is_rejected_when_not_enabled(self):
+        response = self.client.post(
+            reverse('game-list'),
+            self.create_llm_game_payload(provider='local', model='llama3.1:8b'),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'llm_provider_not_configured')
+
     def test_ai_options_endpoint_returns_server_allowlists(self):
         response = self.client.get(reverse('ai-options'))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('openai', response.data['providers'])
         self.assertIn('anthropic', response.data['providers'])
         self.assertIn('gemini', response.data['providers'])
+        self.assertIn('local', response.data['providers'])
         self.assertEqual(response.data['advanced_custom_model_enabled'], True)
+
+    @override_settings(LOCAL_LLM_ENABLED=False)
+    def test_ai_options_endpoint_hides_local_when_disabled(self):
+        response = self.client.get(reverse('ai-options'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn('local', response.data['providers'])
 
     @patch('api.views.GameViewSet._build_llm_client', return_value=FakeLLMClient('e7e5'))
     def test_move_triggers_llm_reply_for_llm_games(self, _mock_client):
@@ -271,3 +302,16 @@ class ProviderClientTests(SimpleTestCase):
             side_to_move='b',
         )
         self.assertEqual(move, 'g8f6')
+
+    @patch('api.players.local_client.post_json')
+    def test_local_client_parses_move(self, post_json_mock):
+        post_json_mock.return_value = {
+            'response': '{"move_uci":"e7e5"}',
+        }
+        client = LocalClient(model='llama3.1:8b', base_url='http://127.0.0.1:11434')
+        move = client.choose_move_uci(
+            fen=chess.STARTING_FEN,
+            legal_moves_uci=['e7e5', 'c7c5'],
+            side_to_move='b',
+        )
+        self.assertEqual(move, 'e7e5')

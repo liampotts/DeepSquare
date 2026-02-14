@@ -20,6 +20,7 @@ const PROVIDER_LABELS = {
   openai: 'OpenAI',
   anthropic: 'Anthropic',
   gemini: 'Gemini',
+  local: 'Local (Ollama)',
 }
 const DEFAULT_AI_OPTIONS = {
   providers: {},
@@ -50,11 +51,14 @@ const getOpponentProfile = (blackPlayerType, blackPlayerConfig = {}) => {
   if (blackPlayerType === 'llm') {
     const provider = (blackPlayerConfig.provider || '').toLowerCase()
     const effectiveModel = blackPlayerConfig.custom_model || blackPlayerConfig.model || 'Unknown model'
+    const runtimeDetail =
+      provider === 'local' ? 'Runtime: local model server (no external API required)' : null
     return {
       title: 'LLM Opponent',
       details: [
         `Provider: ${PROVIDER_LABELS[provider] || provider || 'Unknown provider'}`,
         `Model: ${effectiveModel}`,
+        ...(runtimeDetail ? [runtimeDetail] : []),
         'Move policy: constrained legal-move selection',
       ],
       estimatedElo: 'Experimental / model-dependent',

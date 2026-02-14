@@ -9,7 +9,7 @@ It supports human and Stockfish games end-to-end, and now includes a configurabl
 - React + Vite chess UI with move history, captures, promotion flow, and board interaction UX.
 - AI opponent support:
   - `stockfish` (local binary via UCI).
-  - `llm` (OpenAI, Anthropic, Gemini via provider adapters).
+  - `llm` (OpenAI, Anthropic, Gemini, and local Ollama via provider adapters).
 - New server endpoint: `GET /api/ai/options/` for model allowlists and advanced toggle.
 - LLM game creation with structured config in `black_player_config`.
 - Structured error codes for invalid move and invalid LLM configuration paths.
@@ -67,9 +67,12 @@ The backend reads these environment variables from your shell:
 - `OPENAI_API_KEY` (default: empty)
 - `ANTHROPIC_API_KEY` (default: empty)
 - `GEMINI_API_KEY` (default: empty)
+- `LOCAL_LLM_ENABLED` (default: `true`)
+- `LOCAL_LLM_BASE_URL` (default: `http://127.0.0.1:11434`)
 - `LLM_ALLOWED_MODELS_OPENAI` (CSV, default: `gpt-4.1-mini,gpt-4o-mini`)
 - `LLM_ALLOWED_MODELS_ANTHROPIC` (CSV, default: `claude-3-5-sonnet-latest,claude-3-5-haiku-latest`)
 - `LLM_ALLOWED_MODELS_GEMINI` (CSV, default: `gemini-1.5-pro,gemini-1.5-flash`)
+- `LLM_ALLOWED_MODELS_LOCAL` (CSV, default: `llama3.1:8b`)
 - `LLM_ADVANCED_CUSTOM_MODEL_ENABLED` (default: `true`)
 - `LLM_MOVE_TIMEOUT_SECONDS` (default: `15`)
 
@@ -79,6 +82,9 @@ Example:
 export LLM_FEATURE_ENABLED=true
 export OPENAI_API_KEY=your_key_here
 export LLM_ALLOWED_MODELS_OPENAI=gpt-4.1-mini,gpt-4o-mini
+export LOCAL_LLM_ENABLED=true
+export LOCAL_LLM_BASE_URL=http://127.0.0.1:11434
+export LLM_ALLOWED_MODELS_LOCAL=llama3.1:8b
 ```
 
 ## API Quick Reference
@@ -114,8 +120,8 @@ Human vs LLM:
   "white_player_type": "human",
   "black_player_type": "llm",
   "black_player_config": {
-    "provider": "openai",
-    "model": "gpt-4.1-mini",
+    "provider": "local",
+    "model": "llama3.1:8b",
     "custom_model": ""
   }
 }
@@ -144,7 +150,8 @@ Response:
   "providers": {
     "openai": ["gpt-4.1-mini", "gpt-4o-mini"],
     "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
-    "gemini": ["gemini-1.5-pro", "gemini-1.5-flash"]
+    "gemini": ["gemini-1.5-pro", "gemini-1.5-flash"],
+    "local": ["llama3.1:8b"]
   },
   "advanced_custom_model_enabled": true
 }

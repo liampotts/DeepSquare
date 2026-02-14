@@ -14,12 +14,24 @@ from .players.llm_player import LLMPlayer
 from .players.openai_client import OpenAIClient
 from .players.anthropic_client import AnthropicClient
 from .players.gemini_client import GeminiClient
+from .players.local_client import LocalClient
 
 logger = logging.getLogger(__name__)
 
 
 class AIOptionsView(APIView):
     authentication_classes = []
+
+    @staticmethod
+    def _providers_payload():
+        providers = {
+            'openai': settings.LLM_ALLOWED_MODELS_OPENAI,
+            'anthropic': settings.LLM_ALLOWED_MODELS_ANTHROPIC,
+            'gemini': settings.LLM_ALLOWED_MODELS_GEMINI,
+        }
+        if settings.LOCAL_LLM_ENABLED:
+            providers['local'] = settings.LLM_ALLOWED_MODELS_LOCAL
+        return providers
 
     def get(self, request):
         if not settings.LLM_FEATURE_ENABLED:
@@ -32,11 +44,7 @@ class AIOptionsView(APIView):
 
         return Response(
             {
-                'providers': {
-                    'openai': settings.LLM_ALLOWED_MODELS_OPENAI,
-                    'anthropic': settings.LLM_ALLOWED_MODELS_ANTHROPIC,
-                    'gemini': settings.LLM_ALLOWED_MODELS_GEMINI,
-                },
+                'providers': self._providers_payload(),
                 'advanced_custom_model_enabled': settings.LLM_ADVANCED_CUSTOM_MODEL_ENABLED,
             }
         )
@@ -229,4 +237,10 @@ class GameViewSet(viewsets.ModelViewSet):
             return AnthropicClient(settings.ANTHROPIC_API_KEY, model=model, timeout=timeout)
         if provider == 'gemini':
             return GeminiClient(settings.GEMINI_API_KEY, model=model, timeout=timeout)
+        if provider == 'local':
+            return LocalClient(
+                model=model,
+                base_url=settings.LOCAL_LLM_BASE_URL,
+                timeout=timeout,
+            )
         raise ValueError(f'Unsupported LLM provider: {provider}')
