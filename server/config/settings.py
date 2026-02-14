@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -127,3 +128,41 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+def _parse_bool(value, default=False):
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _parse_csv(value, default):
+    if not value:
+        return default
+    return [item.strip() for item in value.split(',') if item.strip()]
+
+
+LLM_FEATURE_ENABLED = _parse_bool(os.getenv('LLM_FEATURE_ENABLED'), True)
+
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+
+LLM_ALLOWED_MODELS_OPENAI = _parse_csv(
+    os.getenv('LLM_ALLOWED_MODELS_OPENAI'),
+    ['gpt-4.1-mini', 'gpt-4o-mini'],
+)
+LLM_ALLOWED_MODELS_ANTHROPIC = _parse_csv(
+    os.getenv('LLM_ALLOWED_MODELS_ANTHROPIC'),
+    ['claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'],
+)
+LLM_ALLOWED_MODELS_GEMINI = _parse_csv(
+    os.getenv('LLM_ALLOWED_MODELS_GEMINI'),
+    ['gemini-1.5-pro', 'gemini-1.5-flash'],
+)
+
+LLM_ADVANCED_CUSTOM_MODEL_ENABLED = _parse_bool(
+    os.getenv('LLM_ADVANCED_CUSTOM_MODEL_ENABLED'),
+    True,
+)
+LLM_MOVE_TIMEOUT_SECONDS = float(os.getenv('LLM_MOVE_TIMEOUT_SECONDS', '15'))

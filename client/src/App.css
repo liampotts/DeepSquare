@@ -77,6 +77,42 @@
   gap: 0.5rem;
 }
 
+.llm-config {
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.llm-config h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.llm-config label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.llm-config select,
+.llm-config input {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 0.45rem 0.5rem;
+  background: rgba(0, 0, 0, 0.2);
+  color: #fff;
+}
+
+.llm-config input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.llm-config-error {
+  color: #ff9f9f;
+  font-size: 0.8rem;
+}
+
 .opponent-info {
   border-top: 1px solid rgba(255, 255, 255, 0.15);
   padding-top: 0.75rem;

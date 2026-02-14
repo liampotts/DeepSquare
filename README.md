@@ -1,65 +1,191 @@
 # DeepSquare
 
-DeepSquare is a full-stack AI Chess Platform built with **Django** and **React**. It features a premium glassmorphic UI, real-time move history, and integration with the **Stockfish** chess engine.
+DeepSquare is a full-stack chess app with a Django REST backend and a React frontend.  
+It supports human and Stockfish games end-to-end, and now includes a configurable multi-provider LLM opponent in the backend API.
 
-## Features
+## Current Highlights
 
-- **Backend**: Django REST Framework API.
-- **Frontend**: React + Vite with a modern "Glassmorphism" design.
-- **AI Opponents**:
-  - **Stockfish**: Play against the world's strongest open-source engine.
-  - **Mock AI**: Framework for future LLM integration.
-- **Live Updates**: Real-time board state, move validation, and PGN move history.
+- Django REST API for game lifecycle and move validation.
+- React + Vite chess UI with move history, captures, promotion flow, and board interaction UX.
+- AI opponent support:
+  - `stockfish` (local binary via UCI).
+  - `llm` (OpenAI, Anthropic, Gemini via provider adapters).
+- New server endpoint: `GET /api/ai/options/` for model allowlists and advanced toggle.
+- LLM game creation with structured config in `black_player_config`.
+- Structured error codes for invalid move and invalid LLM configuration paths.
+
+## Prerequisites
+
+- Python 3.10+
+- Node.js 18+
+- Stockfish installed and available on `PATH` (macOS example: `brew install stockfish`)
 
 ## Quick Start
 
-### Prerequisites
-- Python 3.8+
-- Node.js 16+
-- Stockfish (installed via Homebrew on Mac: `brew install stockfish`)
+### 1. Clone + Python setup
 
-### 1. Backend Setup
 ```bash
-# Clone the repo
 git clone https://github.com/liampotts/DeepSquare.git
 cd DeepSquare
 
-# Create and activate virtual env
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
+```
 
-# Run migrations
+If Django packages are not already installed in your environment, install them once:
+
+```bash
+pip install django djangorestframework django-cors-headers
+```
+
+### 2. Run backend
+
+```bash
 cd server
 python manage.py migrate
-
-# Start server (runs on port 8001)
 python manage.py runserver 8001
 ```
 
-### 2. Frontend Setup
+Backend base URL: `http://localhost:8001/api`
+
+### 3. Run frontend
+
 ```bash
-# Open a new terminal
-cd DeepSquare/client
-
-# Install dependencies
+cd client
 npm install
-
-# Start development server
 npm run dev
 ```
 
-Visit `http://localhost:5173` to play!
+Frontend URL: `http://localhost:5173`
+
+## LLM Configuration (Backend)
+
+The backend reads these environment variables from your shell:
+
+- `LLM_FEATURE_ENABLED` (default: `true`)
+- `OPENAI_API_KEY` (default: empty)
+- `ANTHROPIC_API_KEY` (default: empty)
+- `GEMINI_API_KEY` (default: empty)
+- `LLM_ALLOWED_MODELS_OPENAI` (CSV, default: `gpt-4.1-mini,gpt-4o-mini`)
+- `LLM_ALLOWED_MODELS_ANTHROPIC` (CSV, default: `claude-3-5-sonnet-latest,claude-3-5-haiku-latest`)
+- `LLM_ALLOWED_MODELS_GEMINI` (CSV, default: `gemini-1.5-pro,gemini-1.5-flash`)
+- `LLM_ADVANCED_CUSTOM_MODEL_ENABLED` (default: `true`)
+- `LLM_MOVE_TIMEOUT_SECONDS` (default: `15`)
+
+Example:
+
+```bash
+export LLM_FEATURE_ENABLED=true
+export OPENAI_API_KEY=your_key_here
+export LLM_ALLOWED_MODELS_OPENAI=gpt-4.1-mini,gpt-4o-mini
+```
+
+## API Quick Reference
+
+All endpoints are under `/api`.
+
+### Create game
+
+`POST /api/games/`
+
+Human vs human:
+
+```json
+{
+  "white_player_type": "human",
+  "black_player_type": "human"
+}
+```
+
+Human vs Stockfish:
+
+```json
+{
+  "white_player_type": "human",
+  "black_player_type": "stockfish"
+}
+```
+
+Human vs LLM:
+
+```json
+{
+  "white_player_type": "human",
+  "black_player_type": "llm",
+  "black_player_config": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "custom_model": ""
+  }
+}
+```
+
+### Submit move
+
+`POST /api/games/{id}/move/`
+
+```json
+{
+  "move_uci": "e2e4"
+}
+```
+
+If black is an AI player, the server makes the black move automatically after the white move.
+
+### Query AI options
+
+`GET /api/ai/options/`
+
+Response:
+
+```json
+{
+  "providers": {
+    "openai": ["gpt-4.1-mini", "gpt-4o-mini"],
+    "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
+    "gemini": ["gemini-1.5-pro", "gemini-1.5-flash"]
+  },
+  "advanced_custom_model_enabled": true
+}
+```
+
+## Error Codes
+
+Move errors:
+
+- `invalid_uci`
+- `illegal_move`
+- `game_over`
+- `ai_move_error`
+
+LLM configuration errors:
+
+- `llm_feature_disabled`
+- `llm_config_invalid`
+- `llm_provider_invalid`
+- `llm_provider_not_configured`
+- `llm_model_required`
+- `llm_custom_model_disabled`
+- `llm_model_not_allowed`
+
+## Tests
+
+Backend API and LLM behavior tests:
+
+```bash
+cd server
+python manage.py test api
+```
 
 ## Project Structure
-- `server/`: Django backend.
-  - `api/`: Main application logic (Game models, Views, Engine wrappers).
-  - `api/players/`: Player implementations (Human, Stockfish, LLM).
-- `client/`: React frontend.
-  - `src/App.jsx`: Main UI logic.
-  - `src/index.css`: Global theme (Dark mode).
+
+- `server/`
+- `server/api/`
+- `server/api/players/`
+- `client/`
+- `client/src/App.jsx`
 
 ## License
+
 MIT

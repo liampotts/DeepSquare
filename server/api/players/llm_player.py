@@ -1,51 +1,39 @@
 import chess
+
 from .base import Player
 from .llm_client import LLMClient
-import re
+
 
 class LLMPlayer(Player):
-    def __init__(self, name: str, client: LLMClient, color: chess.Color):
+    def __init__(self, name: str, client: LLMClient, color: chess.Color, max_attempts=3):
         super().__init__(name)
         self.client = client
         self.color = color
-        self.system_prompt = (
-            "You are a chess grandmaster. You play aggressively but soundly. "
-            "You will be provided with the current board state in FEN notation and a list of legal moves. "
-            "You must select the best move from the legal moves. "
-            "Reply ONLY with the move in Standard Algebraic Notation (SAN). Do not explain."
-        )
+        self.max_attempts = max_attempts
+        self.last_attempt_count = 0
+        self.used_fallback = False
 
     def get_move(self, board: chess.Board) -> chess.Move:
-        legal_moves = [board.san(move) for move in board.legal_moves]
-        fen = board.fen()
-        color_str = "White" if self.color == chess.WHITE else "Black"
-        
-        user_prompt = (
-            f"You are playing as {color_str}.\n"
-            f"Current FEN: {fen}\n"
-            f"Legal moves: {', '.join(legal_moves)}.\n"
-            "What is your move?"
-        )
+        legal_moves = sorted(move.uci() for move in board.legal_moves)
+        side_to_move = 'w' if board.turn == chess.WHITE else 'b'
+        self.last_attempt_count = 0
+        self.used_fallback = False
 
-        # Retry logic could go here
-        attempts = 3
-        for _ in range(attempts):
-            response = self.client.get_completion(self.system_prompt, user_prompt)
-            move_san = self._clean_response(response)
-            
+        for attempt in range(self.max_attempts):
+            self.last_attempt_count = attempt + 1
             try:
-                move = board.parse_san(move_san)
-                if move in board.legal_moves:
-                    return move
-            except ValueError:
-                # print(f"Invalid move returned: {response}") # Debugging
-                pass
-        
-        # Fallback: random move to avoid crashing
-        print(f"{self.name} failed to generate a valid move after {attempts} attempts. Playing random move.")
-        import random
-        return random.choice(list(board.legal_moves))
+                move_uci = self.client.choose_move_uci(
+                    fen=board.fen(),
+                    legal_moves_uci=legal_moves,
+                    side_to_move=side_to_move,
+                    pgn_context='',
+                )
+            except Exception:
+                continue
 
-    def _clean_response(self, response: str) -> str:
-        # Remove any whitespace or extra punctuation
-        return response.strip().strip(".").split()[0]
+            if move_uci in legal_moves:
+                return chess.Move.from_uci(move_uci)
+
+        # Deterministic fallback keeps matches moving and tests stable.
+        self.used_fallback = True
+        return chess.Move.from_uci(legal_moves[0])
