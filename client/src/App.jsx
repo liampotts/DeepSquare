@@ -8,6 +8,7 @@ const API_BASE = 'http://localhost:8001/api'
 
 const PROMOTION_OPTIONS = ['q', 'r', 'b', 'n']
 const STOCKFISH_ESTIMATED_ELO = '~2500 (0.5s/move)'
+const ANALYSIS_MIN_PLIES = 8
 const PIECE_VALUES = {
   p: 1,
   n: 3,
@@ -143,6 +144,9 @@ function App() {
   const [isSubmittingMove, setIsSubmittingMove] = useState(false)
   const [moveError, setMoveError] = useState(null)
   const [opponentProfile, setOpponentProfile] = useState(null)
+  const [analysisResult, setAnalysisResult] = useState(null)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analysisError, setAnalysisError] = useState(null)
 
   const [aiOptions, setAiOptions] = useState(DEFAULT_AI_OPTIONS)
   const [selectedProvider, setSelectedProvider] = useState('')
@@ -255,6 +259,8 @@ function App() {
     const nextGame = createGameFromServer(gameData)
     syncLocalGame(nextGame)
     setOpponentProfile(getOpponentProfile(gameData.black_player_type, gameData.black_player_config || {}))
+    setAnalysisResult(null)
+    setAnalysisError(null)
 
     if (gameData.is_game_over) {
       setStatus(`Game Over! Winner: ${gameData.winner}`)
@@ -266,6 +272,7 @@ function App() {
 
     setIsSubmittingMove(true)
     setMoveError(null)
+    setAnalysisError(null)
 
     try {
       const response = await axios.post(`${API_BASE}/games/${currentGameId}/move/`, {
@@ -392,6 +399,8 @@ function App() {
   const startGame = async ({ blackPlayerType, blackPlayerConfig = null }) => {
     setLoading(true)
     setMoveError(null)
+    setAnalysisError(null)
+    setAnalysisResult(null)
     clearSelection()
     setPendingPromotion(null)
 
@@ -437,6 +446,24 @@ function App() {
     })
   }
 
+  const handleAnalyzeGame = async () => {
+    const currentGameId = gameIdRef.current
+    if (!currentGameId) return
+
+    setIsAnalyzing(true)
+    setAnalysisError(null)
+
+    try {
+      const response = await axios.get(`${API_BASE}/games/${currentGameId}/analysis/`)
+      setAnalysisResult(response.data)
+    } catch (error) {
+      const message = error.response?.data?.error || 'Failed to analyze game'
+      setAnalysisError(message)
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
   const captures = useMemo(() => {
     const history = game.history({ verbose: true })
     const captured = { w: [], b: [] }
@@ -473,6 +500,8 @@ function App() {
     return getPositionStrengthLabel(score)
   }, [game])
 
+  const plyCount = useMemo(() => game.history().length, [game])
+
   const squareStyles = useMemo(() => {
     const styles = {}
 
@@ -494,6 +523,7 @@ function App() {
   }, [selectedSquare, legalTargetSquares])
 
   const canInteract = Boolean(gameId) && !isSubmittingMove && !game.isGameOver() && !pendingPromotion
+  const canAnalyze = Boolean(gameId) && !isAnalyzing && !isSubmittingMove && plyCount >= ANALYSIS_MIN_PLIES
 
   const boardOptions = {
     id: 'deepsquare-board',
@@ -616,6 +646,24 @@ function App() {
           ) : null}
           {moveError ? <div className="status error-status">{moveError}</div> : null}
           {isSubmittingMove ? <div className="status info-status">Submitting move...</div> : null}
+
+          <div className="analysis-controls">
+            <button
+              type="button"
+              className="analyze-button"
+              onClick={handleAnalyzeGame}
+              disabled={!canAnalyze}
+            >
+              Analyze Game
+            </button>
+            <div className="analysis-hint">
+              {plyCount < ANALYSIS_MIN_PLIES
+                ? `Play at least ${ANALYSIS_MIN_PLIES} plies before analysis (${plyCount}/${ANALYSIS_MIN_PLIES}).`
+                : 'Run analysis to estimate both sides and highlight key moments.'}
+            </div>
+          </div>
+          {analysisError ? <div className="status error-status analysis-error">{analysisError}</div> : null}
+          {isAnalyzing ? <div className="status info-status">Analyzing game...</div> : null}
         </div>
 
         <div className="board-wrapper">
@@ -662,6 +710,80 @@ function App() {
           {gameId ? (
             <div style={{ marginTop: '1rem', borderTop: '1px solid #ffffff20', paddingTop: '1rem' }}>
               <small>Game ID: {gameId}</small>
+            </div>
+          ) : null}
+
+          {analysisResult ? (
+            <div className="analysis-panel">
+              <h3>Performance Analysis</h3>
+              <div className="analysis-card-grid">
+                <div className="analysis-card">
+                  <div className="analysis-card-title">Your Performance Elo</div>
+                  <div className="analysis-elo">{analysisResult.white.estimated_elo}</div>
+                  <div className="analysis-metric">
+                    Accuracy: {analysisResult.white.accuracy_percent}% | Avg CPL:{' '}
+                    {analysisResult.white.avg_centipawn_loss}
+                  </div>
+                  <div className="analysis-metric">
+                    Best {analysisResult.white.move_counts.best} | Good {analysisResult.white.move_counts.good} |
+                    Inaccuracy {analysisResult.white.move_counts.inaccuracy} | Mistake{' '}
+                    {analysisResult.white.move_counts.mistake} | Blunder {analysisResult.white.move_counts.blunder}
+                  </div>
+                </div>
+                <div className="analysis-card">
+                  <div className="analysis-card-title">Opponent Performance Elo</div>
+                  <div className="analysis-elo">{analysisResult.black.estimated_elo}</div>
+                  <div className="analysis-metric">
+                    Accuracy: {analysisResult.black.accuracy_percent}% | Avg CPL:{' '}
+                    {analysisResult.black.avg_centipawn_loss}
+                  </div>
+                  <div className="analysis-metric">
+                    Best {analysisResult.black.move_counts.best} | Good {analysisResult.black.move_counts.good} |
+                    Inaccuracy {analysisResult.black.move_counts.inaccuracy} | Mistake{' '}
+                    {analysisResult.black.move_counts.mistake} | Blunder {analysisResult.black.move_counts.blunder}
+                  </div>
+                </div>
+              </div>
+
+              <h4>Key Moves</h4>
+              {analysisResult.key_moves.length === 0 ? (
+                <div className="analysis-empty">No major key moves found in this sample.</div>
+              ) : (
+                <div className="analysis-list">
+                  {analysisResult.key_moves.map((move) => (
+                    <div key={`key-${move.ply}-${move.uci}`} className={`analysis-item ${move.category}`}>
+                      <div className="analysis-item-title">
+                        #{move.ply} {move.side} {move.san} ({move.category})
+                      </div>
+                      <div className="analysis-item-meta">
+                        Impact: {move.cp_loss} cp | Eval: {move.eval_before_cp} to {move.eval_after_cp}
+                      </div>
+                      <div className="analysis-item-copy">{move.commentary}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <h4>Turning Points</h4>
+              {analysisResult.turning_points.length === 0 ? (
+                <div className="analysis-empty">No major turning points identified.</div>
+              ) : (
+                <div className="analysis-list">
+                  {analysisResult.turning_points.map((point) => (
+                    <div key={`tp-${point.ply}-${point.san}`} className="analysis-item turning-point">
+                      <div className="analysis-item-title">
+                        #{point.ply} {point.side} {point.san}
+                      </div>
+                      <div className="analysis-item-meta">Swing: {point.swing_cp} cp</div>
+                      <div className="analysis-item-copy">{point.commentary}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <h4>Game Summary</h4>
+              <p className="analysis-summary">{analysisResult.summary}</p>
+              <div className="analysis-note">{analysisResult.reliability?.note}</div>
             </div>
           ) : null}
         </div>

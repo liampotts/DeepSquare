@@ -7,6 +7,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .models import Game
+from .analysis import AnalysisTooShortError, AnalysisUnavailableError, GameAnalysisService
 from .players.llm_player import LLMPlayer
 from .players.openai_client import OpenAIClient
 from .players.anthropic_client import AnthropicClient
@@ -35,6 +36,60 @@ class FakeLLMClient:
     LLM_ADVANCED_CUSTOM_MODEL_ENABLED=True,
 )
 class GameApiTests(APITestCase):
+    ANALYSIS_FIXTURE = {
+        'game_id': 999,
+        'analysis_profile': 'balanced',
+        'analyzed_plies': 10,
+        'white': {
+            'estimated_elo': 1720,
+            'accuracy_percent': 81,
+            'avg_centipawn_loss': 54,
+            'move_counts': {
+                'best': 2,
+                'good': 2,
+                'inaccuracy': 1,
+                'mistake': 0,
+                'blunder': 0,
+            },
+        },
+        'black': {
+            'estimated_elo': 1640,
+            'accuracy_percent': 76,
+            'avg_centipawn_loss': 68,
+            'move_counts': {
+                'best': 1,
+                'good': 3,
+                'inaccuracy': 1,
+                'mistake': 0,
+                'blunder': 0,
+            },
+        },
+        'key_moves': [
+            {
+                'ply': 4,
+                'side': 'black',
+                'san': 'Nc6',
+                'uci': 'b8c6',
+                'category': 'inaccuracy',
+                'cp_loss': 67,
+                'eval_before_cp': 22,
+                'eval_after_cp': 89,
+                'commentary': 'Small but meaningful loss of evaluation compared to the top engine line.',
+            }
+        ],
+        'turning_points': [
+            {
+                'ply': 7,
+                'side': 'white',
+                'san': 'd4',
+                'swing_cp': 120,
+                'commentary': 'This move produced one of the largest evaluation swings in the game.',
+            }
+        ],
+        'summary': 'Detailed narrative summary.',
+        'reliability': {'sufficient_sample': True, 'note': 'Performance Elo estimate for this game only.'},
+    }
+
     def create_game(self, **overrides):
         payload = {
             'white_player_type': 'human',
@@ -237,6 +292,95 @@ class GameApiTests(APITestCase):
         self.assertIn('e5', response.data['pgn'])
         self.assertEqual(response.data['fen'].split(' ')[1], 'w')
 
+    @patch('api.views.GameAnalysisService.analyze_game')
+    def test_analysis_happy_path_returns_expected_shape(self, analyze_mock):
+        game = self.create_game()
+        analyze_mock.return_value = {**self.ANALYSIS_FIXTURE, 'game_id': game['id']}
+
+        response = self.client.get(reverse('game-analysis', kwargs={'pk': game['id']}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['game_id'], game['id'])
+        self.assertIn('white', response.data)
+        self.assertIn('black', response.data)
+        self.assertIn('key_moves', response.data)
+        self.assertIn('turning_points', response.data)
+        self.assertIn('summary', response.data)
+
+    @patch(
+        'api.views.GameAnalysisService.analyze_game',
+        side_effect=AnalysisTooShortError(min_plies=8, analyzed_plies=4),
+    )
+    def test_analysis_too_short_returns_structured_error(self, _analyze_mock):
+        game = self.create_game()
+        response = self.client.get(reverse('game-analysis', kwargs={'pk': game['id']}))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['error'], 'Not enough moves to analyze')
+        self.assertEqual(response.data['code'], 'analysis_too_short')
+        self.assertEqual(response.data['min_plies'], 8)
+
+    @patch(
+        'api.views.GameAnalysisService.analyze_game',
+        side_effect=AnalysisUnavailableError('Stockfish engine unavailable'),
+    )
+    def test_analysis_unavailable_maps_to_503(self, _analyze_mock):
+        game = self.create_game()
+        response = self.client.get(reverse('game-analysis', kwargs={'pk': game['id']}))
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['error'], 'Analysis engine unavailable')
+        self.assertEqual(response.data['code'], 'analysis_unavailable')
+
+    @patch('api.views.GameAnalysisService.analyze_game', side_effect=RuntimeError('boom'))
+    def test_analysis_unexpected_failure_maps_to_500(self, _analyze_mock):
+        game = self.create_game()
+        response = self.client.get(reverse('game-analysis', kwargs={'pk': game['id']}))
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(response.data['error'], 'Failed to analyze game')
+        self.assertEqual(response.data['code'], 'analysis_failed')
+
+    @patch('api.views.GameAnalysisService.analyze_game')
+    def test_analysis_does_not_mutate_game_state(self, analyze_mock):
+        game_data = self.create_game()
+        game = Game.objects.get(pk=game_data['id'])
+        original = {
+            'fen': game.fen,
+            'pgn': game.pgn,
+            'is_game_over': game.is_game_over,
+            'winner': game.winner,
+        }
+        analyze_mock.return_value = {**self.ANALYSIS_FIXTURE, 'game_id': game.id}
+
+        response = self.client.get(reverse('game-analysis', kwargs={'pk': game.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        game.refresh_from_db()
+        self.assertEqual(game.fen, original['fen'])
+        self.assertEqual(game.pgn, original['pgn'])
+        self.assertEqual(game.is_game_over, original['is_game_over'])
+        self.assertEqual(game.winner, original['winner'])
+
+    @patch('api.views.GameAnalysisService.analyze_game')
+    def test_analysis_endpoint_available_for_all_modes(self, analyze_mock):
+        analyze_mock.return_value = self.ANALYSIS_FIXTURE
+
+        games = [
+            self.create_game(black_player_type='human'),
+            self.create_game(black_player_type='stockfish'),
+            self.client.post(
+                reverse('game-list'),
+                self.create_llm_game_payload(provider='openai', model='gpt-4.1-mini'),
+                format='json',
+            ).data,
+        ]
+
+        for game_data in games:
+            response = self.client.get(reverse('game-analysis', kwargs={'pk': game_data['id']}))
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertIn('white', response.data)
+            self.assertIn('black', response.data)
+
 
 class LLMPlayerTests(SimpleTestCase):
     def test_llm_player_falls_back_to_deterministic_legal_move(self):
@@ -268,6 +412,41 @@ class ProviderClientTests(SimpleTestCase):
             side_to_move='b',
         )
         self.assertEqual(move, 'e7e5')
+
+
+class GameAnalysisServiceMathTests(SimpleTestCase):
+    def test_move_categories_follow_thresholds(self):
+        service = GameAnalysisService()
+
+        self.assertEqual(service._categorize_move(0), 'best')
+        self.assertEqual(service._categorize_move(20), 'best')
+        self.assertEqual(service._categorize_move(21), 'good')
+        self.assertEqual(service._categorize_move(50), 'good')
+        self.assertEqual(service._categorize_move(51), 'inaccuracy')
+        self.assertEqual(service._categorize_move(100), 'inaccuracy')
+        self.assertEqual(service._categorize_move(101), 'mistake')
+        self.assertEqual(service._categorize_move(200), 'mistake')
+        self.assertEqual(service._categorize_move(201), 'blunder')
+
+    def test_side_metrics_expose_elo_accuracy_and_counts(self):
+        service = GameAnalysisService()
+        move_reports = [
+            {'side': 'white', 'cp_loss': 10, 'category': 'best'},
+            {'side': 'white', 'cp_loss': 40, 'category': 'good'},
+            {'side': 'white', 'cp_loss': 120, 'category': 'mistake'},
+            {'side': 'black', 'cp_loss': 30, 'category': 'good'},
+            {'side': 'black', 'cp_loss': 250, 'category': 'blunder'},
+        ]
+
+        white = service._build_side_metrics('white', move_reports)
+        black = service._build_side_metrics('black', move_reports)
+
+        self.assertIn('estimated_elo', white)
+        self.assertIn('accuracy_percent', white)
+        self.assertIn('avg_centipawn_loss', white)
+        self.assertEqual(white['move_counts']['best'], 1)
+        self.assertEqual(white['move_counts']['mistake'], 1)
+        self.assertEqual(black['move_counts']['blunder'], 1)
 
     @patch('api.players.anthropic_client.post_json')
     def test_anthropic_client_parses_move(self, post_json_mock):
