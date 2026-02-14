@@ -16,27 +16,61 @@ const PIECE_VALUES = {
   q: 9,
   k: 0,
 }
-
-const OPPONENT_PROFILE = {
-  human: {
-    title: 'Human Opponent',
-    details: ['Another player controls the black pieces.'],
-  },
-  stockfish: {
-    title: 'Stockfish Engine',
-    details: [
-      'Engine: Stockfish (UCI)',
-      'Runtime: Local server binary',
-      'Strength profile: ~0.5s search per move',
-    ],
-  },
+const PROVIDER_LABELS = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  gemini: 'Gemini',
+  local: 'Local (Ollama)',
+}
+const DEFAULT_AI_OPTIONS = {
+  providers: {},
+  advanced_custom_model_enabled: false,
 }
 
-const getOpponentProfile = (blackPlayerType) =>
-  OPPONENT_PROFILE[blackPlayerType] || {
+const getOpponentProfile = (blackPlayerType, blackPlayerConfig = {}) => {
+  if (blackPlayerType === 'human') {
+    return {
+      title: 'Human Opponent',
+      details: ['Another player controls the black pieces.'],
+      estimatedElo: null,
+    }
+  }
+
+  if (blackPlayerType === 'stockfish') {
+    return {
+      title: 'Stockfish Engine',
+      details: [
+        'Engine: Stockfish (UCI)',
+        'Runtime: Local server binary',
+        'Strength profile: ~0.5s search per move',
+      ],
+      estimatedElo: STOCKFISH_ESTIMATED_ELO,
+    }
+  }
+
+  if (blackPlayerType === 'llm') {
+    const provider = (blackPlayerConfig.provider || '').toLowerCase()
+    const effectiveModel = blackPlayerConfig.custom_model || blackPlayerConfig.model || 'Unknown model'
+    const runtimeDetail =
+      provider === 'local' ? 'Runtime: local model server (no external API required)' : null
+    return {
+      title: 'LLM Opponent',
+      details: [
+        `Provider: ${PROVIDER_LABELS[provider] || provider || 'Unknown provider'}`,
+        `Model: ${effectiveModel}`,
+        ...(runtimeDetail ? [runtimeDetail] : []),
+        'Move policy: constrained legal-move selection',
+      ],
+      estimatedElo: 'Experimental / model-dependent',
+    }
+  }
+
+  return {
     title: blackPlayerType || 'Unknown Opponent',
     details: ['No additional details available.'],
+    estimatedElo: null,
   }
+}
 
 const getPieceIcon = (pieceChar) => {
   const icons = {
@@ -110,6 +144,12 @@ function App() {
   const [moveError, setMoveError] = useState(null)
   const [opponentProfile, setOpponentProfile] = useState(null)
 
+  const [aiOptions, setAiOptions] = useState(DEFAULT_AI_OPTIONS)
+  const [selectedProvider, setSelectedProvider] = useState('')
+  const [selectedModel, setSelectedModel] = useState('')
+  const [customModelOverride, setCustomModelOverride] = useState('')
+  const [aiOptionsError, setAiOptionsError] = useState(null)
+
   const gameRef = useRef(game)
   const gameIdRef = useRef(gameId)
 
@@ -120,6 +160,61 @@ function App() {
   useEffect(() => {
     gameIdRef.current = gameId
   }, [gameId])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const fetchAiOptions = async () => {
+      try {
+        const response = await axios.get(`${API_BASE}/ai/options/`)
+        const options = {
+          providers: response.data?.providers || {},
+          advanced_custom_model_enabled: Boolean(response.data?.advanced_custom_model_enabled),
+        }
+
+        if (cancelled) return
+
+        setAiOptions(options)
+        setAiOptionsError(null)
+
+        const providers = Object.keys(options.providers)
+        if (providers.length === 0) {
+          setSelectedProvider('')
+          setSelectedModel('')
+          setAiOptionsError('LLM opponents are currently unavailable on this server.')
+          return
+        }
+
+        const defaultProvider = providers[0]
+        setSelectedProvider(defaultProvider)
+        setSelectedModel(options.providers[defaultProvider]?.[0] || '')
+      } catch {
+        if (cancelled) return
+        setAiOptions(DEFAULT_AI_OPTIONS)
+        setAiOptionsError('Failed to load LLM options.')
+      }
+    }
+
+    void fetchAiOptions()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!selectedProvider) return
+    const models = aiOptions.providers[selectedProvider] || []
+    if (models.length === 0) {
+      if (selectedModel !== '') {
+        setSelectedModel('')
+      }
+      return
+    }
+    if (!models.includes(selectedModel)) {
+      setSelectedModel(models[0])
+    }
+  }, [aiOptions.providers, selectedProvider, selectedModel])
 
   const clearSelection = () => {
     setSelectedSquare(null)
@@ -159,7 +254,7 @@ function App() {
   const hydrateFromServer = (gameData) => {
     const nextGame = createGameFromServer(gameData)
     syncLocalGame(nextGame)
-    setOpponentProfile(getOpponentProfile(gameData.black_player_type))
+    setOpponentProfile(getOpponentProfile(gameData.black_player_type, gameData.black_player_config || {}))
 
     if (gameData.is_game_over) {
       setStatus(`Game Over! Winner: ${gameData.winner}`)
@@ -294,17 +389,23 @@ function App() {
     clearSelection()
   }
 
-  const startGame = async (blackPlayerType) => {
+  const startGame = async ({ blackPlayerType, blackPlayerConfig = null }) => {
     setLoading(true)
     setMoveError(null)
     clearSelection()
     setPendingPromotion(null)
 
+    const payload = {
+      white_player_type: 'human',
+      black_player_type: blackPlayerType,
+    }
+
+    if (blackPlayerType === 'llm') {
+      payload.black_player_config = blackPlayerConfig || {}
+    }
+
     try {
-      const response = await axios.post(`${API_BASE}/games/`, {
-        white_player_type: 'human',
-        black_player_type: blackPlayerType,
-      })
+      const response = await axios.post(`${API_BASE}/games/`, payload)
 
       const gameData = response.data
       setGameId(gameData.id)
@@ -318,6 +419,22 @@ function App() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleStartLlmGame = () => {
+    if (!selectedProvider || !selectedModel) {
+      setMoveError('Choose an LLM provider and model first.')
+      return
+    }
+
+    void startGame({
+      blackPlayerType: 'llm',
+      blackPlayerConfig: {
+        provider: selectedProvider,
+        model: selectedModel,
+        custom_model: aiOptions.advanced_custom_model_enabled ? customModelOverride.trim() : '',
+      },
+    })
   }
 
   const captures = useMemo(() => {
@@ -404,13 +521,84 @@ function App() {
         <div className="glass-panel controls-panel">
           <h3>Game Mode</h3>
           <div className="mode-select">
-            <button onClick={() => startGame('human')} disabled={loading || isSubmittingMove}>
+            <button
+              onClick={() => startGame({ blackPlayerType: 'human' })}
+              disabled={loading || isSubmittingMove}
+            >
               Play vs Friend
             </button>
-            <button onClick={() => startGame('stockfish')} disabled={loading || isSubmittingMove}>
+            <button
+              onClick={() => startGame({ blackPlayerType: 'stockfish' })}
+              disabled={loading || isSubmittingMove}
+            >
               Play vs Stockfish
             </button>
           </div>
+
+          <div className="llm-config">
+            <h4>LLM Opponent</h4>
+            <label htmlFor="llm-provider">Provider</label>
+            <select
+              id="llm-provider"
+              value={selectedProvider}
+              onChange={(event) => setSelectedProvider(event.target.value)}
+              disabled={loading || isSubmittingMove || Object.keys(aiOptions.providers).length === 0}
+            >
+              {Object.keys(aiOptions.providers).length === 0 ? (
+                <option value="">Unavailable</option>
+              ) : (
+                Object.keys(aiOptions.providers).map((provider) => (
+                  <option key={provider} value={provider}>
+                    {PROVIDER_LABELS[provider] || provider}
+                  </option>
+                ))
+              )}
+            </select>
+
+            <label htmlFor="llm-model">Model</label>
+            <select
+              id="llm-model"
+              value={selectedModel}
+              onChange={(event) => setSelectedModel(event.target.value)}
+              disabled={loading || isSubmittingMove || !selectedProvider}
+            >
+              {(aiOptions.providers[selectedProvider] || []).map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+
+            {aiOptions.advanced_custom_model_enabled ? (
+              <>
+                <label htmlFor="llm-custom-model">Custom model override (optional)</label>
+                <input
+                  id="llm-custom-model"
+                  type="text"
+                  value={customModelOverride}
+                  placeholder="provider-specific model id"
+                  onChange={(event) => setCustomModelOverride(event.target.value)}
+                  disabled={loading || isSubmittingMove || !selectedProvider}
+                />
+              </>
+            ) : null}
+
+            <button
+              onClick={handleStartLlmGame}
+              disabled={
+                loading ||
+                isSubmittingMove ||
+                !selectedProvider ||
+                !selectedModel ||
+                Object.keys(aiOptions.providers).length === 0
+              }
+            >
+              Play vs LLM
+            </button>
+
+            {aiOptionsError ? <div className="llm-config-error">{aiOptionsError}</div> : null}
+          </div>
+
           <div className="status">{status}</div>
           {opponentProfile ? (
             <div className="opponent-info">
@@ -420,8 +608,8 @@ function App() {
                   {detail}
                 </div>
               ))}
-              {opponentProfile.title === 'Stockfish Engine' ? (
-                <div className="opponent-metric">Estimated Elo: {STOCKFISH_ESTIMATED_ELO}</div>
+              {opponentProfile.estimatedElo ? (
+                <div className="opponent-metric">Estimated Elo: {opponentProfile.estimatedElo}</div>
               ) : null}
               <div className="opponent-metric">Position strength: {positionStrength}</div>
             </div>

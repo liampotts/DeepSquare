@@ -19,6 +19,7 @@ class Game(models.Model):
     # For now, simple strings identifying mode/player
     white_player_type = models.CharField(max_length=20, default='human')
     black_player_type = models.CharField(max_length=20, default='human') # human, stockfish, llm
+    black_player_config = models.JSONField(default=dict, blank=True)
 
     def __str__(self):
         return f"Game {self.id} ({self.white_player_type} vs {self.black_player_type})"
