@@ -6,7 +6,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Game
+from .models import ArenaRun, Game
 from .analysis import AnalysisTooShortError, AnalysisUnavailableError, GameAnalysisService
 from .players.llm_player import LLMPlayer
 from .players.openai_client import OpenAIClient
@@ -21,6 +21,19 @@ class FakeLLMClient:
 
     def choose_move_uci(self, fen, legal_moves_uci, side_to_move, pgn_context=''):
         return self.response_move
+
+
+class FakeSequenceLLMClient:
+    def __init__(self, moves):
+        self.moves = list(moves)
+        self.index = 0
+
+    def choose_move_uci(self, fen, legal_moves_uci, side_to_move, pgn_context=''):
+        if self.index >= len(self.moves):
+            return self.moves[-1]
+        move = self.moves[self.index]
+        self.index += 1
+        return move
 
 
 @override_settings(
@@ -100,15 +113,24 @@ class GameApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         return response.data
 
-    def create_llm_game_payload(self, provider='openai', model='gpt-4.1-mini', custom_model=''):
+    def create_llm_game_payload(
+        self,
+        provider='openai',
+        model='gpt-4.1-mini',
+        custom_model='',
+        ttc_policy=None,
+    ):
+        config = {
+            'provider': provider,
+            'model': model,
+            'custom_model': custom_model,
+        }
+        if ttc_policy is not None:
+            config['ttc_policy'] = ttc_policy
         return {
             'white_player_type': 'human',
             'black_player_type': 'llm',
-            'black_player_config': {
-                'provider': provider,
-                'model': model,
-                'custom_model': custom_model,
-            },
+            'black_player_config': config,
         }
 
     def test_create_game_returns_start_state_and_legal_moves(self):
@@ -196,6 +218,43 @@ class GameApiTests(APITestCase):
         self.assertEqual(response.data['black_player_type'], 'llm')
         self.assertEqual(response.data['black_player_config']['provider'], 'openai')
         self.assertEqual(response.data['black_player_config']['model'], 'gpt-4.1-mini')
+        self.assertEqual(response.data['black_player_config']['ttc_policy']['name'], 'baseline')
+
+    def test_create_llm_game_with_ttc_policy(self):
+        response = self.client.post(
+            reverse('game-list'),
+            self.create_llm_game_payload(
+                provider='openai',
+                model='gpt-4.1-mini',
+                ttc_policy={'name': 'self_consistency', 'samples': 5},
+            ),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['black_player_config']['ttc_policy']['name'], 'self_consistency')
+        self.assertEqual(response.data['black_player_config']['ttc_policy']['samples'], 5)
+
+    def test_create_llm_vs_llm_game(self):
+        payload = {
+            'white_player_type': 'llm',
+            'black_player_type': 'llm',
+            'white_player_config': {
+                'provider': 'openai',
+                'model': 'gpt-4.1-mini',
+                'custom_model': 'white-model',
+            },
+            'black_player_config': {
+                'provider': 'openai',
+                'model': 'gpt-4.1-mini',
+                'custom_model': 'black-model',
+            },
+        }
+        response = self.client.post(reverse('game-list'), payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['white_player_type'], 'llm')
+        self.assertEqual(response.data['black_player_type'], 'llm')
+        self.assertEqual(response.data['white_player_config']['custom_model'], 'white-model')
+        self.assertEqual(response.data['black_player_config']['custom_model'], 'black-model')
 
     def test_invalid_llm_provider_rejected(self):
         response = self.client.post(
@@ -291,6 +350,171 @@ class GameApiTests(APITestCase):
         self.assertIn('e4', response.data['pgn'])
         self.assertIn('e5', response.data['pgn'])
         self.assertEqual(response.data['fen'].split(' ')[1], 'w')
+
+    @patch('api.views.GameViewSet._build_llm_client')
+    def test_autoplay_advances_llm_vs_llm_game(self, build_client_mock):
+        def client_factory(provider, model):
+            if model == 'white-model':
+                return FakeSequenceLLMClient(['e2e4', 'g1f3'])
+            return FakeSequenceLLMClient(['e7e5', 'b8c6'])
+
+        build_client_mock.side_effect = client_factory
+        create_response = self.client.post(
+            reverse('game-list'),
+            {
+                'white_player_type': 'llm',
+                'black_player_type': 'llm',
+                'white_player_config': {
+                    'provider': 'openai',
+                    'model': 'gpt-4.1-mini',
+                    'custom_model': 'white-model',
+                },
+                'black_player_config': {
+                    'provider': 'openai',
+                    'model': 'gpt-4.1-mini',
+                    'custom_model': 'black-model',
+                },
+            },
+            format='json',
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+
+        autoplay_url = reverse('game-autoplay', kwargs={'pk': create_response.data['id']})
+        response = self.client.post(autoplay_url, {'max_plies': 4}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(response.data['autoplay_plies'], 2)
+        self.assertIn('e4', response.data['pgn'])
+        self.assertIn('e5', response.data['pgn'])
+
+    @patch('api.views.build_llm_client')
+    def test_arena_simulate_runs_batch_games(self, build_client_mock):
+        def client_factory(provider, model):
+            if model == 'player-a-model':
+                return FakeSequenceLLMClient(['e2e4', 'g1f3'])
+            return FakeSequenceLLMClient(['e7e5', 'b8c6'])
+
+        build_client_mock.side_effect = client_factory
+
+        payload = {
+            'num_games': 10,
+            'max_plies': 6,
+            'alternate_colors': True,
+            'player_a': {
+                'provider': 'local',
+                'model': 'llama3.1:8b',
+                'custom_model': 'player-a-model',
+                'ttc_policy': {'name': 'baseline'},
+            },
+            'player_b': {
+                'provider': 'local',
+                'model': 'llama3.1:8b',
+                'custom_model': 'player-b-model',
+                'ttc_policy': {'name': 'self_consistency', 'samples': 3},
+            },
+        }
+        response = self.client.post(reverse('arena-simulate'), payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['num_games'], 10)
+        self.assertEqual(len(response.data['games']), 10)
+        total_a = (
+            response.data['player_a']['wins']
+            + response.data['player_a']['losses']
+            + response.data['player_a']['draws']
+        )
+        self.assertEqual(total_a, 10)
+        self.assertIn('summary', response.data)
+        self.assertIn('avg_plies', response.data['summary'])
+        self.assertIn('avg_attempts_per_move', response.data['player_a'])
+
+    @patch('api.views.build_llm_client')
+    def test_arena_runs_create_sync_and_fetch_detail(self, build_client_mock):
+        def client_factory(provider, model):
+            if model == 'player-a-model':
+                return FakeSequenceLLMClient(['e2e4', 'g1f3', 'f1c4'])
+            return FakeSequenceLLMClient(['e7e5', 'b8c6', 'g8f6'])
+
+        build_client_mock.side_effect = client_factory
+
+        payload = {
+            'run_async': False,
+            'num_games': 4,
+            'max_plies': 8,
+            'alternate_colors': True,
+            'player_a': {
+                'provider': 'local',
+                'model': 'llama3.1:8b',
+                'custom_model': 'player-a-model',
+                'ttc_policy': {'name': 'baseline'},
+            },
+            'player_b': {
+                'provider': 'local',
+                'model': 'llama3.1:8b',
+                'custom_model': 'player-b-model',
+                'ttc_policy': {'name': 'uncertainty_fallback', 'samples': 3},
+            },
+        }
+        create_response = self.client.post(reverse('arena-runs'), payload, format='json')
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data['status'], 'completed')
+        self.assertNotIn('games', create_response.data['result'])
+
+        detail_response = self.client.get(
+            reverse('arena-run-detail', kwargs={'run_id': create_response.data['id']}) + '?include_games=1'
+        )
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data['status'], 'completed')
+        self.assertEqual(detail_response.data['result']['num_games'], 4)
+        self.assertEqual(len(detail_response.data['result']['games']), 4)
+
+    def test_arena_rejects_non_local_provider(self):
+        payload = {
+            'num_games': 2,
+            'max_plies': 12,
+            'alternate_colors': True,
+            'player_a': {
+                'provider': 'openai',
+                'model': 'gpt-4.1-mini',
+                'custom_model': '',
+                'ttc_policy': {'name': 'baseline'},
+            },
+            'player_b': {
+                'provider': 'local',
+                'model': 'llama3.1:8b',
+                'custom_model': '',
+                'ttc_policy': {'name': 'baseline'},
+            },
+        }
+        response = self.client.post(reverse('arena-simulate'), payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'arena_local_only')
+
+    def test_arena_runs_list_and_not_found(self):
+        run1 = ArenaRun.objects.create(
+            status='completed',
+            config={'num_games': 2},
+            result={'num_games': 2, 'games': [{'game_index': 1}, {'game_index': 2}]},
+        )
+        ArenaRun.objects.create(
+            status='failed',
+            config={'num_games': 1},
+            result={},
+            error='boom',
+        )
+
+        list_response = self.client.get(reverse('arena-runs') + '?limit=1')
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_response.data['runs']), 1)
+        self.assertNotIn('games', list_response.data['runs'][0].get('result', {}))
+
+        detail_response = self.client.get(
+            reverse('arena-run-detail', kwargs={'run_id': run1.id}) + '?include_games=1'
+        )
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertIn('games', detail_response.data.get('result', {}))
+
+        missing_response = self.client.get(reverse('arena-run-detail', kwargs={'run_id': 999999}))
+        self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing_response.data['code'], 'arena_run_not_found')
 
     @patch('api.views.GameAnalysisService.analyze_game')
     def test_analysis_happy_path_returns_expected_shape(self, analyze_mock):

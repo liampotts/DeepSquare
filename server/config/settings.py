@@ -154,7 +154,7 @@ LLM_ALLOWED_MODELS_GEMINI = _parse_csv(
 )
 LLM_ALLOWED_MODELS_LOCAL = _parse_csv(
     os.getenv('LLM_ALLOWED_MODELS_LOCAL'),
-    ['llama3.1:8b'],
+    ['llama3.1:8b', 'qwen3:8b', 'qwen2.5:1.5b-instruct', 'llama3.2:1b'],
 )
 
 LLM_ADVANCED_CUSTOM_MODEL_ENABLED = _parse_bool(

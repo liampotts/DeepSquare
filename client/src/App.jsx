@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Chessboard } from 'react-chessboard'
 import { Chess } from 'chess.js'
 import axios from 'axios'
@@ -27,6 +27,84 @@ const DEFAULT_AI_OPTIONS = {
   providers: {},
   advanced_custom_model_enabled: false,
 }
+const TTC_POLICY_OPTIONS = [
+  { value: 'baseline', label: 'Baseline' },
+  { value: 'self_consistency', label: 'Self-Consistency' },
+  { value: 'verifier', label: 'Verifier' },
+  { value: 'uncertainty_fallback', label: 'Uncertainty Fallback' },
+]
+
+const createArenaPlayer = () => ({
+  provider: 'local',
+  model: '',
+  customModel: '',
+  policyName: 'baseline',
+  samples: 3,
+  maxAttempts: 3,
+  agreementThreshold: 0.67,
+  verifierProvider: '',
+  verifierModel: '',
+  fallbackProvider: '',
+  fallbackModel: '',
+})
+
+const normalizeArenaPlayer = (player, providersMap) => {
+  const localModels = (providersMap || {}).local || []
+  if (localModels.length === 0) {
+    return {
+      ...player,
+      provider: '',
+      model: '',
+      verifierProvider: '',
+      verifierModel: '',
+      fallbackProvider: '',
+      fallbackModel: '',
+    }
+  }
+
+  const provider = 'local'
+  const model = localModels.includes(player.model) ? player.model : localModels[0] || ''
+
+  let verifierModel = player.verifierModel
+  if (verifierModel && !localModels.includes(verifierModel)) {
+    verifierModel = localModels[0] || ''
+  }
+
+  let fallbackModel = player.fallbackModel
+  if (fallbackModel && !localModels.includes(fallbackModel)) {
+    fallbackModel = localModels[0] || ''
+  }
+
+  return {
+    ...player,
+    provider,
+    model,
+    verifierProvider: verifierModel ? 'local' : '',
+    verifierModel,
+    fallbackProvider: fallbackModel ? 'local' : '',
+    fallbackModel,
+  }
+}
+
+const buildTtcPolicyConfig = (player) => ({
+  name: player.policyName,
+  samples: Number(player.samples) || 3,
+  max_attempts: Number(player.maxAttempts) || 3,
+  agreement_threshold: Number(player.agreementThreshold) || 0.67,
+  verifier_provider: player.verifierModel ? 'local' : '',
+  verifier_model: player.verifierModel,
+  fallback_provider: player.fallbackModel ? 'local' : '',
+  fallback_model: player.fallbackModel,
+})
+
+const buildArenaPayloadPlayer = (player) => ({
+  provider: 'local',
+  model: player.model,
+  custom_model: player.customModel.trim(),
+  ttc_policy: buildTtcPolicyConfig(player),
+})
+
+const percentText = (value) => `${Math.round((Number(value) || 0) * 100)}%`
 
 const getOpponentProfile = (blackPlayerType, blackPlayerConfig = {}) => {
   if (blackPlayerType === 'human') {
@@ -153,9 +231,32 @@ function App() {
   const [selectedModel, setSelectedModel] = useState('')
   const [customModelOverride, setCustomModelOverride] = useState('')
   const [aiOptionsError, setAiOptionsError] = useState(null)
+  const [activeTab, setActiveTab] = useState('play')
+
+  const [arenaPlayerA, setArenaPlayerA] = useState(createArenaPlayer)
+  const [arenaPlayerB, setArenaPlayerB] = useState(createArenaPlayer)
+  const [arenaNumGames, setArenaNumGames] = useState(20)
+  const [arenaMaxPlies, setArenaMaxPlies] = useState(120)
+  const [arenaAlternateColors, setArenaAlternateColors] = useState(true)
+  const [arenaRunId, setArenaRunId] = useState(null)
+  const [arenaRunStatus, setArenaRunStatus] = useState('idle')
+  const [arenaRunResult, setArenaRunResult] = useState(null)
+  const [arenaRunError, setArenaRunError] = useState(null)
+  const [arenaSubmitting, setArenaSubmitting] = useState(false)
+  const [arenaRecentRuns, setArenaRecentRuns] = useState([])
+
+  const [liveArenaGame, setLiveArenaGame] = useState(new Chess())
+  const [liveArenaFen, setLiveArenaFen] = useState(new Chess().fen())
+  const [liveArenaGameId, setLiveArenaGameId] = useState(null)
+  const [liveArenaStatus, setLiveArenaStatus] = useState('No live LLM arena game started.')
+  const [liveArenaBusy, setLiveArenaBusy] = useState(false)
+  const [liveArenaError, setLiveArenaError] = useState(null)
+  const [liveArenaAuto, setLiveArenaAuto] = useState(false)
 
   const gameRef = useRef(game)
   const gameIdRef = useRef(gameId)
+  const liveArenaBusyRef = useRef(false)
+  const arenaPollRef = useRef(null)
 
   useEffect(() => {
     gameRef.current = game
@@ -164,6 +265,10 @@ function App() {
   useEffect(() => {
     gameIdRef.current = gameId
   }, [gameId])
+
+  useEffect(() => {
+    liveArenaBusyRef.current = liveArenaBusy
+  }, [liveArenaBusy])
 
   useEffect(() => {
     let cancelled = false
@@ -192,6 +297,12 @@ function App() {
         const defaultProvider = providers[0]
         setSelectedProvider(defaultProvider)
         setSelectedModel(options.providers[defaultProvider]?.[0] || '')
+        setArenaPlayerA((previous) =>
+          normalizeArenaPlayer(previous, options.providers, providers[0]),
+        )
+        setArenaPlayerB((previous) =>
+          normalizeArenaPlayer(previous, options.providers, providers[1] || providers[0]),
+        )
       } catch {
         if (cancelled) return
         setAiOptions(DEFAULT_AI_OPTIONS)
@@ -219,6 +330,16 @@ function App() {
       setSelectedModel(models[0])
     }
   }, [aiOptions.providers, selectedProvider, selectedModel])
+
+  useEffect(() => {
+    const providers = aiOptions.providers || {}
+    const providerKeys = Object.keys(providers)
+    if (providerKeys.length === 0) return
+    setArenaPlayerA((previous) => normalizeArenaPlayer(previous, providers, providerKeys[0]))
+    setArenaPlayerB((previous) =>
+      normalizeArenaPlayer(previous, providers, providerKeys[1] || providerKeys[0]),
+    )
+  }, [aiOptions.providers])
 
   const clearSelection = () => {
     setSelectedSquare(null)
@@ -464,6 +585,180 @@ function App() {
     }
   }
 
+  const setArenaPlayerField = (side, field, value) => {
+    const updater = side === 'a' ? setArenaPlayerA : setArenaPlayerB
+    updater((previous) => ({ ...previous, [field]: value }))
+  }
+
+  const loadArenaRuns = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/arena/runs/?limit=8`)
+      setArenaRecentRuns(response.data?.runs || [])
+    } catch {
+      setArenaRecentRuns([])
+    }
+  }
+
+  const loadArenaRunDetail = async (runId, includeGames = false) => {
+    const response = await axios.get(
+      `${API_BASE}/arena/runs/${runId}/?include_games=${includeGames ? '1' : '0'}`,
+    )
+    const payload = response.data
+    setArenaRunStatus(payload.status || 'unknown')
+    setArenaRunResult(payload.result || null)
+    setArenaRunError(payload.error || null)
+    return payload
+  }
+
+  const handleRunArenaBatch = async () => {
+    const required = [
+      [arenaPlayerA.model, 'Player A model'],
+      [arenaPlayerB.model, 'Player B model'],
+    ]
+    const missing = required.find(([value]) => !value)
+    if (missing) {
+      setArenaRunError(`${missing[1]} is required.`)
+      return
+    }
+
+    setArenaSubmitting(true)
+    setArenaRunError(null)
+    setArenaRunResult(null)
+    setArenaRunStatus('queued')
+
+    try {
+      const payload = {
+        run_async: true,
+        num_games: Number(arenaNumGames),
+        max_plies: Number(arenaMaxPlies),
+        alternate_colors: Boolean(arenaAlternateColors),
+        player_a: buildArenaPayloadPlayer(arenaPlayerA),
+        player_b: buildArenaPayloadPlayer(arenaPlayerB),
+      }
+      const response = await axios.post(`${API_BASE}/arena/runs/`, payload)
+      setArenaRunId(response.data.id)
+      setArenaRunStatus(response.data.status || 'queued')
+      await loadArenaRuns()
+    } catch (error) {
+      setArenaRunStatus('failed')
+      setArenaRunError(error.response?.data?.error || 'Failed to start arena run.')
+    } finally {
+      setArenaSubmitting(false)
+    }
+  }
+
+  const hydrateLiveArenaGame = useCallback((gameData) => {
+    const nextGame = createGameFromServer(gameData)
+    setLiveArenaGame(nextGame)
+    setLiveArenaFen(nextGame.fen())
+    if (gameData.is_game_over) {
+      setLiveArenaStatus(`Live game complete. Winner: ${gameData.winner}`)
+      setLiveArenaAuto(false)
+    } else {
+      setLiveArenaStatus(
+        `Live game #${gameData.id} in progress (${nextGame.history().length} plies).`,
+      )
+    }
+  }, [])
+
+  const handleStartLiveArenaGame = async () => {
+    if (!arenaPlayerA.model || !arenaPlayerB.model) {
+      setLiveArenaError('Both players must have a local model selected.')
+      return
+    }
+
+    setLiveArenaBusy(true)
+    setLiveArenaError(null)
+    setLiveArenaAuto(false)
+
+    try {
+      const payload = {
+        white_player_type: 'llm',
+        black_player_type: 'llm',
+        white_player_config: buildArenaPayloadPlayer(arenaPlayerA),
+        black_player_config: buildArenaPayloadPlayer(arenaPlayerB),
+      }
+      const response = await axios.post(`${API_BASE}/games/`, payload)
+      setLiveArenaGameId(response.data.id)
+      hydrateLiveArenaGame(response.data)
+    } catch (error) {
+      setLiveArenaError(error.response?.data?.error || 'Failed to start live arena game.')
+    } finally {
+      setLiveArenaBusy(false)
+    }
+  }
+
+  const stepLiveArena = useCallback(async (maxPlies = 2) => {
+    if (!liveArenaGameId || liveArenaBusyRef.current) return
+    liveArenaBusyRef.current = true
+    setLiveArenaBusy(true)
+    setLiveArenaError(null)
+    try {
+      const response = await axios.post(`${API_BASE}/games/${liveArenaGameId}/autoplay/`, {
+        max_plies: maxPlies,
+      })
+      hydrateLiveArenaGame(response.data)
+    } catch (error) {
+      setLiveArenaError(error.response?.data?.error || 'Failed to advance live arena game.')
+      setLiveArenaAuto(false)
+    } finally {
+      liveArenaBusyRef.current = false
+      setLiveArenaBusy(false)
+    }
+  }, [liveArenaGameId, hydrateLiveArenaGame])
+
+  useEffect(() => {
+    if (activeTab !== 'arena') return
+    void loadArenaRuns()
+  }, [activeTab])
+
+  useEffect(() => {
+    const isRunning = arenaRunStatus === 'queued' || arenaRunStatus === 'running'
+    if (!arenaRunId || !isRunning) {
+      if (arenaPollRef.current) {
+        clearInterval(arenaPollRef.current)
+        arenaPollRef.current = null
+      }
+      return
+    }
+
+    arenaPollRef.current = setInterval(async () => {
+      try {
+        const payload = await loadArenaRunDetail(arenaRunId, false)
+        if (payload.status === 'completed' || payload.status === 'failed') {
+          await loadArenaRunDetail(arenaRunId, true)
+          await loadArenaRuns()
+          if (arenaPollRef.current) {
+            clearInterval(arenaPollRef.current)
+            arenaPollRef.current = null
+          }
+        }
+      } catch {
+        setArenaRunStatus('failed')
+        setArenaRunError('Failed to poll arena run status.')
+        if (arenaPollRef.current) {
+          clearInterval(arenaPollRef.current)
+          arenaPollRef.current = null
+        }
+      }
+    }, 2000)
+
+    return () => {
+      if (arenaPollRef.current) {
+        clearInterval(arenaPollRef.current)
+        arenaPollRef.current = null
+      }
+    }
+  }, [arenaRunId, arenaRunStatus])
+
+  useEffect(() => {
+    if (!liveArenaAuto || !liveArenaGameId) return
+    const intervalId = setInterval(() => {
+      void stepLiveArena(2)
+    }, 900)
+    return () => clearInterval(intervalId)
+  }, [liveArenaAuto, liveArenaGameId, stepLiveArena])
+
   const captures = useMemo(() => {
     const history = game.history({ verbose: true })
     const captured = { w: [], b: [] }
@@ -501,6 +796,18 @@ function App() {
   }, [game])
 
   const plyCount = useMemo(() => game.history().length, [game])
+  const liveArenaHistoryRows = useMemo(() => {
+    const history = liveArenaGame.history({ verbose: true })
+    const rows = []
+    for (let index = 0; index < history.length; index += 2) {
+      rows.push({
+        num: Math.floor(index / 2) + 1,
+        white: history[index],
+        black: history[index + 1] || null,
+      })
+    }
+    return rows
+  }, [liveArenaGame])
 
   const squareStyles = useMemo(() => {
     const styles = {}
@@ -524,6 +831,11 @@ function App() {
 
   const canInteract = Boolean(gameId) && !isSubmittingMove && !game.isGameOver() && !pendingPromotion
   const canAnalyze = Boolean(gameId) && !isAnalyzing && !isSubmittingMove && plyCount >= ANALYSIS_MIN_PLIES
+  const localArenaModels = aiOptions.providers.local || []
+  const canRunArenaBatch = !arenaSubmitting
+    && localArenaModels.length > 0
+    && Boolean(arenaPlayerA.model)
+    && Boolean(arenaPlayerB.model)
 
   const boardOptions = {
     id: 'deepsquare-board',
@@ -543,253 +855,605 @@ function App() {
     },
   }
 
+  const liveArenaBoardOptions = {
+    id: 'deepsquare-arena-board',
+    position: liveArenaFen,
+    arePiecesDraggable: false,
+    boardStyle: {
+      borderRadius: '4px',
+      boxShadow: '0 5px 15px rgba(0, 0, 0, 0.5)',
+    },
+    darkSquareStyle: { backgroundColor: '#779556' },
+    lightSquareStyle: { backgroundColor: '#ebecd0' },
+  }
+
   return (
     <div className="app-container">
       <h1 className="title">DeepSquare</h1>
 
-      <div className="game-layout">
-        <div className="glass-panel controls-panel">
-          <h3>Game Mode</h3>
-          <div className="mode-select">
-            <button
-              onClick={() => startGame({ blackPlayerType: 'human' })}
-              disabled={loading || isSubmittingMove}
-            >
-              Play vs Friend
-            </button>
-            <button
-              onClick={() => startGame({ blackPlayerType: 'stockfish' })}
-              disabled={loading || isSubmittingMove}
-            >
-              Play vs Stockfish
-            </button>
+      <div className="tab-strip">
+        <button
+          type="button"
+          className={`tab-button ${activeTab === 'play' ? 'active' : ''}`}
+          onClick={() => setActiveTab('play')}
+        >
+          Play
+        </button>
+        <button
+          type="button"
+          className={`tab-button ${activeTab === 'arena' ? 'active' : ''}`}
+          onClick={() => setActiveTab('arena')}
+        >
+          Arena
+        </button>
+      </div>
+
+      {activeTab === 'play' ? (
+        <div className="game-layout">
+          <div className="glass-panel controls-panel">
+            <h3>Game Mode</h3>
+            <div className="mode-select">
+              <button
+                onClick={() => startGame({ blackPlayerType: 'human' })}
+                disabled={loading || isSubmittingMove}
+              >
+                Play vs Friend
+              </button>
+              <button
+                onClick={() => startGame({ blackPlayerType: 'stockfish' })}
+                disabled={loading || isSubmittingMove}
+              >
+                Play vs Stockfish
+              </button>
+            </div>
+
+            <div className="llm-config">
+              <h4>LLM Opponent</h4>
+              <label htmlFor="llm-provider">Provider</label>
+              <select
+                id="llm-provider"
+                value={selectedProvider}
+                onChange={(event) => setSelectedProvider(event.target.value)}
+                disabled={loading || isSubmittingMove || Object.keys(aiOptions.providers).length === 0}
+              >
+                {Object.keys(aiOptions.providers).length === 0 ? (
+                  <option value="">Unavailable</option>
+                ) : (
+                  Object.keys(aiOptions.providers).map((provider) => (
+                    <option key={provider} value={provider}>
+                      {PROVIDER_LABELS[provider] || provider}
+                    </option>
+                  ))
+                )}
+              </select>
+
+              <label htmlFor="llm-model">Model</label>
+              <select
+                id="llm-model"
+                value={selectedModel}
+                onChange={(event) => setSelectedModel(event.target.value)}
+                disabled={loading || isSubmittingMove || !selectedProvider}
+              >
+                {(aiOptions.providers[selectedProvider] || []).map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+
+              {aiOptions.advanced_custom_model_enabled ? (
+                <>
+                  <label htmlFor="llm-custom-model">Custom model override (optional)</label>
+                  <input
+                    id="llm-custom-model"
+                    type="text"
+                    value={customModelOverride}
+                    placeholder="provider-specific model id"
+                    onChange={(event) => setCustomModelOverride(event.target.value)}
+                    disabled={loading || isSubmittingMove || !selectedProvider}
+                  />
+                </>
+              ) : null}
+
+              <button
+                onClick={handleStartLlmGame}
+                disabled={
+                  loading ||
+                  isSubmittingMove ||
+                  !selectedProvider ||
+                  !selectedModel ||
+                  Object.keys(aiOptions.providers).length === 0
+                }
+              >
+                Play vs LLM
+              </button>
+
+              {aiOptionsError ? <div className="llm-config-error">{aiOptionsError}</div> : null}
+            </div>
+
+            <div className="status">{status}</div>
+            {opponentProfile ? (
+              <div className="opponent-info">
+                <div className="opponent-title">{opponentProfile.title}</div>
+                {opponentProfile.details.map((detail) => (
+                  <div key={detail} className="opponent-detail">
+                    {detail}
+                  </div>
+                ))}
+                {opponentProfile.estimatedElo ? (
+                  <div className="opponent-metric">Estimated Elo: {opponentProfile.estimatedElo}</div>
+                ) : null}
+                <div className="opponent-metric">Position strength: {positionStrength}</div>
+              </div>
+            ) : null}
+            {moveError ? <div className="status error-status">{moveError}</div> : null}
+            {isSubmittingMove ? <div className="status info-status">Submitting move...</div> : null}
+
+            <div className="analysis-controls">
+              <button
+                type="button"
+                className="analyze-button"
+                onClick={handleAnalyzeGame}
+                disabled={!canAnalyze}
+              >
+                Analyze Game
+              </button>
+              <div className="analysis-hint">
+                {plyCount < ANALYSIS_MIN_PLIES
+                  ? `Play at least ${ANALYSIS_MIN_PLIES} plies before analysis (${plyCount}/${ANALYSIS_MIN_PLIES}).`
+                  : 'Run analysis to estimate both sides and highlight key moments.'}
+              </div>
+            </div>
+            {analysisError ? <div className="status error-status analysis-error">{analysisError}</div> : null}
+            {isAnalyzing ? <div className="status info-status">Analyzing game...</div> : null}
           </div>
 
-          <div className="llm-config">
-            <h4>LLM Opponent</h4>
-            <label htmlFor="llm-provider">Provider</label>
-            <select
-              id="llm-provider"
-              value={selectedProvider}
-              onChange={(event) => setSelectedProvider(event.target.value)}
-              disabled={loading || isSubmittingMove || Object.keys(aiOptions.providers).length === 0}
-            >
-              {Object.keys(aiOptions.providers).length === 0 ? (
-                <option value="">Unavailable</option>
-              ) : (
-                Object.keys(aiOptions.providers).map((provider) => (
-                  <option key={provider} value={provider}>
-                    {PROVIDER_LABELS[provider] || provider}
-                  </option>
-                ))
-              )}
-            </select>
+          <div className="board-wrapper">
+            <div className="board-shell">
+              <Chessboard options={boardOptions} />
+            </div>
+          </div>
 
-            <label htmlFor="llm-model">Model</label>
-            <select
-              id="llm-model"
-              value={selectedModel}
-              onChange={(event) => setSelectedModel(event.target.value)}
-              disabled={loading || isSubmittingMove || !selectedProvider}
-            >
-              {(aiOptions.providers[selectedProvider] || []).map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
+          <div className="glass-panel info-panel">
+            <h3>Captures</h3>
+            <div className="captures-container">
+              <div className="capture-row">
+                <span>White: </span>
+                {captures.w.map((piece, index) => (
+                  <span key={`${piece}-${index}`} className="piece-icon black-piece">
+                    {getPieceIcon(piece)}
+                  </span>
+                ))}
+              </div>
+              <div className="capture-row">
+                <span>Black: </span>
+                {captures.b.map((piece, index) => (
+                  <span key={`${piece}-${index}`} className="piece-icon white-piece">
+                    {getPieceIcon(piece)}
+                  </span>
+                ))}
+              </div>
+            </div>
 
-            {aiOptions.advanced_custom_model_enabled ? (
-              <>
-                <label htmlFor="llm-custom-model">Custom model override (optional)</label>
-                <input
-                  id="llm-custom-model"
-                  type="text"
-                  value={customModelOverride}
-                  placeholder="provider-specific model id"
-                  onChange={(event) => setCustomModelOverride(event.target.value)}
-                  disabled={loading || isSubmittingMove || !selectedProvider}
-                />
-              </>
+            <h3>Move History</h3>
+            <div className="history-container">
+              <table className="history-table">
+                <tbody>
+                  {historyRows.map((row) => (
+                    <tr key={row.num}>
+                      <td className="move-num">{row.num}.</td>
+                      <td className="white-move">{row.white.san}</td>
+                      <td className="black-move">{row.black ? row.black.san : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {gameId ? (
+              <div style={{ marginTop: '1rem', borderTop: '1px solid #ffffff20', paddingTop: '1rem' }}>
+                <small>Game ID: {gameId}</small>
+              </div>
             ) : null}
 
-            <button
-              onClick={handleStartLlmGame}
-              disabled={
-                loading ||
-                isSubmittingMove ||
-                !selectedProvider ||
-                !selectedModel ||
-                Object.keys(aiOptions.providers).length === 0
-              }
-            >
-              Play vs LLM
-            </button>
+            {analysisResult ? (
+              <div className="analysis-panel">
+                <h3>Performance Analysis</h3>
+                <div className="analysis-card-grid">
+                  <div className="analysis-card">
+                    <div className="analysis-card-title">Your Performance Elo</div>
+                    <div className="analysis-elo">{analysisResult.white.estimated_elo}</div>
+                    <div className="analysis-metric">
+                      Accuracy: {analysisResult.white.accuracy_percent}% | Avg CPL:{' '}
+                      {analysisResult.white.avg_centipawn_loss}
+                    </div>
+                    <div className="analysis-metric">
+                      Best {analysisResult.white.move_counts.best} | Good {analysisResult.white.move_counts.good} |
+                      Inaccuracy {analysisResult.white.move_counts.inaccuracy} | Mistake{' '}
+                      {analysisResult.white.move_counts.mistake} | Blunder {analysisResult.white.move_counts.blunder}
+                    </div>
+                  </div>
+                  <div className="analysis-card">
+                    <div className="analysis-card-title">Opponent Performance Elo</div>
+                    <div className="analysis-elo">{analysisResult.black.estimated_elo}</div>
+                    <div className="analysis-metric">
+                      Accuracy: {analysisResult.black.accuracy_percent}% | Avg CPL:{' '}
+                      {analysisResult.black.avg_centipawn_loss}
+                    </div>
+                    <div className="analysis-metric">
+                      Best {analysisResult.black.move_counts.best} | Good {analysisResult.black.move_counts.good} |
+                      Inaccuracy {analysisResult.black.move_counts.inaccuracy} | Mistake{' '}
+                      {analysisResult.black.move_counts.mistake} | Blunder {analysisResult.black.move_counts.blunder}
+                    </div>
+                  </div>
+                </div>
 
+                <h4>Key Moves</h4>
+                {analysisResult.key_moves.length === 0 ? (
+                  <div className="analysis-empty">No major key moves found in this sample.</div>
+                ) : (
+                  <div className="analysis-list">
+                    {analysisResult.key_moves.map((move) => (
+                      <div key={`key-${move.ply}-${move.uci}`} className={`analysis-item ${move.category}`}>
+                        <div className="analysis-item-title">
+                          #{move.ply} {move.side} {move.san} ({move.category})
+                        </div>
+                        <div className="analysis-item-meta">
+                          Impact: {move.cp_loss} cp | Eval: {move.eval_before_cp} to {move.eval_after_cp}
+                        </div>
+                        <div className="analysis-item-copy">{move.commentary}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <h4>Turning Points</h4>
+                {analysisResult.turning_points.length === 0 ? (
+                  <div className="analysis-empty">No major turning points identified.</div>
+                ) : (
+                  <div className="analysis-list">
+                    {analysisResult.turning_points.map((point) => (
+                      <div key={`tp-${point.ply}-${point.san}`} className="analysis-item turning-point">
+                        <div className="analysis-item-title">
+                          #{point.ply} {point.side} {point.san}
+                        </div>
+                        <div className="analysis-item-meta">Swing: {point.swing_cp} cp</div>
+                        <div className="analysis-item-copy">{point.commentary}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <h4>Game Summary</h4>
+                <p className="analysis-summary">{analysisResult.summary}</p>
+                <div className="analysis-note">{analysisResult.reliability?.note}</div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : (
+        <div className="arena-layout">
+          <div className="glass-panel arena-controls">
+            <h3>LLM Arena Config</h3>
+            <p className="arena-note">Configure both players, run batch matches, and compare policy metrics.</p>
+
+            {[
+              { key: 'a', title: 'Player A' },
+              { key: 'b', title: 'Player B' },
+            ].map((entry) => {
+              const player = entry.key === 'a' ? arenaPlayerA : arenaPlayerB
+              const modelOptions = localArenaModels
+              const verifierModels = localArenaModels
+              const fallbackModels = localArenaModels
+              return (
+                <div key={entry.key} className="arena-player-card">
+                  <h4>{entry.title}</h4>
+                  <label>Provider</label>
+                  <div className="arena-provider-fixed">Local (Ollama)</div>
+
+                  <label>Model</label>
+                  <select
+                    value={player.model}
+                    onChange={(event) => setArenaPlayerField(entry.key, 'model', event.target.value)}
+                    disabled={modelOptions.length === 0}
+                  >
+                    {modelOptions.length === 0 ? (
+                      <option value="">No local models available</option>
+                    ) : null}
+                    {modelOptions.map((model) => (
+                      <option key={`${entry.key}-model-${model}`} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
+
+                  {aiOptions.advanced_custom_model_enabled ? (
+                    <>
+                      <label>Custom model override</label>
+                      <input
+                        type="text"
+                        value={player.customModel}
+                        placeholder="optional custom model id"
+                        onChange={(event) => setArenaPlayerField(entry.key, 'customModel', event.target.value)}
+                      />
+                    </>
+                  ) : null}
+
+                  <label>TTC Policy</label>
+                  <select
+                    value={player.policyName}
+                    onChange={(event) => setArenaPlayerField(entry.key, 'policyName', event.target.value)}
+                  >
+                    {TTC_POLICY_OPTIONS.map((option) => (
+                      <option key={`${entry.key}-policy-${option.value}`} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  {player.policyName !== 'baseline' ? (
+                    <>
+                      <label>Samples</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={12}
+                        value={player.samples}
+                        onChange={(event) => setArenaPlayerField(entry.key, 'samples', event.target.value)}
+                      />
+                      <label>Max Attempts</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={player.maxAttempts}
+                        onChange={(event) => setArenaPlayerField(entry.key, 'maxAttempts', event.target.value)}
+                      />
+                    </>
+                  ) : null}
+
+                  {player.policyName === 'verifier' ? (
+                    <>
+                      <label>Verifier Model</label>
+                      <select
+                        value={player.verifierModel}
+                        onChange={(event) => {
+                          const model = event.target.value
+                          setArenaPlayerField(entry.key, 'verifierModel', model)
+                          setArenaPlayerField(entry.key, 'verifierProvider', model ? 'local' : '')
+                        }}
+                      >
+                        <option value="">None</option>
+                        {verifierModels.map((model) => (
+                          <option key={`${entry.key}-verifier-model-${model}`} value={model}>
+                            {model}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  ) : null}
+
+                  {player.policyName === 'uncertainty_fallback' ? (
+                    <>
+                      <label>Agreement Threshold</label>
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={1}
+                        step={0.01}
+                        value={player.agreementThreshold}
+                        onChange={(event) =>
+                          setArenaPlayerField(entry.key, 'agreementThreshold', event.target.value)
+                        }
+                      />
+                      <label>Fallback Model</label>
+                      <select
+                        value={player.fallbackModel}
+                        onChange={(event) => {
+                          const model = event.target.value
+                          setArenaPlayerField(entry.key, 'fallbackModel', model)
+                          setArenaPlayerField(entry.key, 'fallbackProvider', model ? 'local' : '')
+                        }}
+                      >
+                        <option value="">None</option>
+                        {fallbackModels.map((model) => (
+                          <option key={`${entry.key}-fallback-model-${model}`} value={model}>
+                            {model}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  ) : null}
+                </div>
+              )
+            })}
+
+            <div className="arena-run-config">
+              <label>Number of Games</label>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={arenaNumGames}
+                onChange={(event) => setArenaNumGames(event.target.value)}
+              />
+              <label>Max Plies per Game</label>
+              <input
+                type="number"
+                min={2}
+                max={300}
+                value={arenaMaxPlies}
+                onChange={(event) => setArenaMaxPlies(event.target.value)}
+              />
+              <label className="arena-checkbox">
+                <input
+                  type="checkbox"
+                  checked={arenaAlternateColors}
+                  onChange={(event) => setArenaAlternateColors(event.target.checked)}
+                />
+                Alternate colors between games
+              </label>
+            </div>
+
+            <div className="arena-actions">
+              <button type="button" onClick={handleRunArenaBatch} disabled={!canRunArenaBatch}>
+                {arenaSubmitting ? 'Starting...' : 'Run Batch'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!arenaRunId) return
+                  void loadArenaRunDetail(arenaRunId, true)
+                }}
+                disabled={!arenaRunId}
+              >
+                Refresh Run
+              </button>
+            </div>
+
+            <div className="status">
+              Arena Run: {arenaRunId ? `#${arenaRunId} (${arenaRunStatus})` : 'none'}
+            </div>
+            {localArenaModels.length === 0 ? (
+              <div className="status error-status">No local Ollama models in server allowlist.</div>
+            ) : null}
+            {arenaRunError ? <div className="status error-status">{arenaRunError}</div> : null}
             {aiOptionsError ? <div className="llm-config-error">{aiOptionsError}</div> : null}
           </div>
 
-          <div className="status">{status}</div>
-          {opponentProfile ? (
-            <div className="opponent-info">
-              <div className="opponent-title">{opponentProfile.title}</div>
-              {opponentProfile.details.map((detail) => (
-                <div key={detail} className="opponent-detail">
-                  {detail}
-                </div>
-              ))}
-              {opponentProfile.estimatedElo ? (
-                <div className="opponent-metric">Estimated Elo: {opponentProfile.estimatedElo}</div>
-              ) : null}
-              <div className="opponent-metric">Position strength: {positionStrength}</div>
+          <div className="glass-panel arena-live-panel">
+            <h3>Live Arena</h3>
+            <div className="arena-actions">
+              <button type="button" onClick={handleStartLiveArenaGame} disabled={liveArenaBusy || arenaSubmitting}>
+                Start Live Match
+              </button>
+              <button
+                type="button"
+                onClick={() => void stepLiveArena(2)}
+                disabled={!liveArenaGameId || liveArenaBusy}
+              >
+                Step 2 Plies
+              </button>
+              <button
+                type="button"
+                onClick={() => setLiveArenaAuto((value) => !value)}
+                disabled={!liveArenaGameId}
+              >
+                {liveArenaAuto ? 'Pause Auto' : 'Auto Play'}
+              </button>
             </div>
-          ) : null}
-          {moveError ? <div className="status error-status">{moveError}</div> : null}
-          {isSubmittingMove ? <div className="status info-status">Submitting move...</div> : null}
-
-          <div className="analysis-controls">
-            <button
-              type="button"
-              className="analyze-button"
-              onClick={handleAnalyzeGame}
-              disabled={!canAnalyze}
-            >
-              Analyze Game
-            </button>
-            <div className="analysis-hint">
-              {plyCount < ANALYSIS_MIN_PLIES
-                ? `Play at least ${ANALYSIS_MIN_PLIES} plies before analysis (${plyCount}/${ANALYSIS_MIN_PLIES}).`
-                : 'Run analysis to estimate both sides and highlight key moments.'}
+            <div className="status">{liveArenaStatus}</div>
+            {liveArenaError ? <div className="status error-status">{liveArenaError}</div> : null}
+            <div className="board-shell arena-board-shell">
+              <Chessboard options={liveArenaBoardOptions} />
             </div>
-          </div>
-          {analysisError ? <div className="status error-status analysis-error">{analysisError}</div> : null}
-          {isAnalyzing ? <div className="status info-status">Analyzing game...</div> : null}
-        </div>
-
-        <div className="board-wrapper">
-          <div className="board-shell">
-            <Chessboard options={boardOptions} />
-          </div>
-        </div>
-
-        <div className="glass-panel info-panel">
-          <h3>Captures</h3>
-          <div className="captures-container">
-            <div className="capture-row">
-              <span>White: </span>
-              {captures.w.map((piece, index) => (
-                <span key={`${piece}-${index}`} className="piece-icon black-piece">
-                  {getPieceIcon(piece)}
-                </span>
-              ))}
+            <div className="history-container arena-history">
+              <table className="history-table">
+                <tbody>
+                  {liveArenaHistoryRows.map((row) => (
+                    <tr key={`live-${row.num}`}>
+                      <td className="move-num">{row.num}.</td>
+                      <td className="white-move">{row.white.san}</td>
+                      <td className="black-move">{row.black ? row.black.san : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <div className="capture-row">
-              <span>Black: </span>
-              {captures.b.map((piece, index) => (
-                <span key={`${piece}-${index}`} className="piece-icon white-piece">
-                  {getPieceIcon(piece)}
-                </span>
-              ))}
-            </div>
+            {liveArenaGameId ? <small>Live Game ID: {liveArenaGameId}</small> : null}
           </div>
 
-          <h3>Move History</h3>
-          <div className="history-container">
-            <table className="history-table">
-              <tbody>
-                {historyRows.map((row) => (
-                  <tr key={row.num}>
-                    <td className="move-num">{row.num}.</td>
-                    <td className="white-move">{row.white.san}</td>
-                    <td className="black-move">{row.black ? row.black.san : ''}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {gameId ? (
-            <div style={{ marginTop: '1rem', borderTop: '1px solid #ffffff20', paddingTop: '1rem' }}>
-              <small>Game ID: {gameId}</small>
-            </div>
-          ) : null}
-
-          {analysisResult ? (
-            <div className="analysis-panel">
-              <h3>Performance Analysis</h3>
-              <div className="analysis-card-grid">
-                <div className="analysis-card">
-                  <div className="analysis-card-title">Your Performance Elo</div>
-                  <div className="analysis-elo">{analysisResult.white.estimated_elo}</div>
-                  <div className="analysis-metric">
-                    Accuracy: {analysisResult.white.accuracy_percent}% | Avg CPL:{' '}
-                    {analysisResult.white.avg_centipawn_loss}
+          <div className="glass-panel arena-results-panel">
+            <h3>Batch Results</h3>
+            {arenaRunResult ? (
+              <>
+                <div className="arena-metric-grid">
+                  <div className="analysis-card">
+                    <div className="analysis-card-title">Player A</div>
+                    <div className="analysis-metric">
+                      W/L/D: {arenaRunResult.player_a.wins}/{arenaRunResult.player_a.losses}/
+                      {arenaRunResult.player_a.draws}
+                    </div>
+                    <div className="analysis-metric">Win rate: {percentText(arenaRunResult.player_a.win_rate)}</div>
+                    <div className="analysis-metric">Score: {arenaRunResult.player_a.score}</div>
+                    <div className="analysis-metric">
+                      Avg attempts/move: {arenaRunResult.player_a.avg_attempts_per_move}
+                    </div>
+                    <div className="analysis-metric">
+                      Fallback rate: {percentText(arenaRunResult.player_a.fallback_rate)}
+                    </div>
+                    <div className="analysis-metric">
+                      Avg latency: {arenaRunResult.player_a.avg_latency_ms} ms
+                    </div>
+                    <div className="analysis-metric">
+                      Est. cost: ${arenaRunResult.player_a.estimated_cost_usd}
+                    </div>
                   </div>
-                  <div className="analysis-metric">
-                    Best {analysisResult.white.move_counts.best} | Good {analysisResult.white.move_counts.good} |
-                    Inaccuracy {analysisResult.white.move_counts.inaccuracy} | Mistake{' '}
-                    {analysisResult.white.move_counts.mistake} | Blunder {analysisResult.white.move_counts.blunder}
+                  <div className="analysis-card">
+                    <div className="analysis-card-title">Player B</div>
+                    <div className="analysis-metric">
+                      W/L/D: {arenaRunResult.player_b.wins}/{arenaRunResult.player_b.losses}/
+                      {arenaRunResult.player_b.draws}
+                    </div>
+                    <div className="analysis-metric">Win rate: {percentText(arenaRunResult.player_b.win_rate)}</div>
+                    <div className="analysis-metric">Score: {arenaRunResult.player_b.score}</div>
+                    <div className="analysis-metric">
+                      Avg attempts/move: {arenaRunResult.player_b.avg_attempts_per_move}
+                    </div>
+                    <div className="analysis-metric">
+                      Fallback rate: {percentText(arenaRunResult.player_b.fallback_rate)}
+                    </div>
+                    <div className="analysis-metric">
+                      Avg latency: {arenaRunResult.player_b.avg_latency_ms} ms
+                    </div>
+                    <div className="analysis-metric">
+                      Est. cost: ${arenaRunResult.player_b.estimated_cost_usd}
+                    </div>
                   </div>
                 </div>
                 <div className="analysis-card">
-                  <div className="analysis-card-title">Opponent Performance Elo</div>
-                  <div className="analysis-elo">{analysisResult.black.estimated_elo}</div>
+                  <div className="analysis-card-title">Run Summary</div>
+                  <div className="analysis-metric">Average plies: {arenaRunResult.summary?.avg_plies}</div>
                   <div className="analysis-metric">
-                    Accuracy: {analysisResult.black.accuracy_percent}% | Avg CPL:{' '}
-                    {analysisResult.black.avg_centipawn_loss}
+                    Decisive rate: {percentText(arenaRunResult.summary?.decisive_rate)}
                   </div>
-                  <div className="analysis-metric">
-                    Best {analysisResult.black.move_counts.best} | Good {analysisResult.black.move_counts.good} |
-                    Inaccuracy {analysisResult.black.move_counts.inaccuracy} | Mistake{' '}
-                    {analysisResult.black.move_counts.mistake} | Blunder {analysisResult.black.move_counts.blunder}
-                  </div>
+                  <div className="analysis-metric">Draw rate: {percentText(arenaRunResult.summary?.draw_rate)}</div>
                 </div>
-              </div>
+              </>
+            ) : (
+              <div className="analysis-empty">No run result yet. Start a batch to generate metrics.</div>
+            )}
 
-              <h4>Key Moves</h4>
-              {analysisResult.key_moves.length === 0 ? (
-                <div className="analysis-empty">No major key moves found in this sample.</div>
-              ) : (
-                <div className="analysis-list">
-                  {analysisResult.key_moves.map((move) => (
-                    <div key={`key-${move.ply}-${move.uci}`} className={`analysis-item ${move.category}`}>
-                      <div className="analysis-item-title">
-                        #{move.ply} {move.side} {move.san} ({move.category})
-                      </div>
-                      <div className="analysis-item-meta">
-                        Impact: {move.cp_loss} cp | Eval: {move.eval_before_cp} to {move.eval_after_cp}
-                      </div>
-                      <div className="analysis-item-copy">{move.commentary}</div>
-                    </div>
+            <h4>Recent Runs</h4>
+            <div className="history-container arena-runs-list">
+              <table className="history-table">
+                <tbody>
+                  {arenaRecentRuns.map((run) => (
+                    <tr key={`run-${run.id}`}>
+                      <td className="move-num">#{run.id}</td>
+                      <td className="white-move">{run.status}</td>
+                      <td className="black-move">{run.config?.num_games || '-'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setArenaRunId(run.id)
+                            setArenaRunStatus(run.status)
+                            void loadArenaRunDetail(run.id, run.status === 'completed')
+                          }}
+                        >
+                          Open
+                        </button>
+                      </td>
+                    </tr>
                   ))}
-                </div>
-              )}
-
-              <h4>Turning Points</h4>
-              {analysisResult.turning_points.length === 0 ? (
-                <div className="analysis-empty">No major turning points identified.</div>
-              ) : (
-                <div className="analysis-list">
-                  {analysisResult.turning_points.map((point) => (
-                    <div key={`tp-${point.ply}-${point.san}`} className="analysis-item turning-point">
-                      <div className="analysis-item-title">
-                        #{point.ply} {point.side} {point.san}
-                      </div>
-                      <div className="analysis-item-meta">Swing: {point.swing_cp} cp</div>
-                      <div className="analysis-item-copy">{point.commentary}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <h4>Game Summary</h4>
-              <p className="analysis-summary">{analysisResult.summary}</p>
-              <div className="analysis-note">{analysisResult.reliability?.note}</div>
+                </tbody>
+              </table>
             </div>
-          ) : null}
+          </div>
         </div>
-      </div>
+      )}
 
-      {pendingPromotion ? (
+      {activeTab === 'play' && pendingPromotion ? (
         <div className="promotion-overlay" role="dialog" aria-modal="true" aria-label="Choose promotion piece">
           <div className="promotion-modal">
             <h3>Choose Promotion</h3>
