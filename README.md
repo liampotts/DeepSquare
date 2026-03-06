@@ -60,6 +60,65 @@ npm run dev
 
 Frontend URL: `http://localhost:5173`
 
+## Self-Hosted Deployment (Docker Compose)
+
+This repo now includes:
+- `/Users/liampotts/DeepSquare/docker-compose.yml`
+- `/Users/liampotts/DeepSquare/server/Dockerfile`
+- `/Users/liampotts/DeepSquare/client/Dockerfile`
+- `/Users/liampotts/DeepSquare/client/nginx/default.conf`
+- `/Users/liampotts/DeepSquare/.env.production.example`
+
+### 1. Prepare production env
+
+```bash
+cp .env.production.example .env.production
+```
+
+Edit `.env.production` with your real values:
+- `SECRET_KEY`
+- `ALLOWED_HOSTS`
+- `CSRF_TRUSTED_ORIGINS`
+- `POSTGRES_PASSWORD`
+- Optional LLM provider keys
+
+### 2. Start app stack
+
+```bash
+docker compose --env-file .env.production up -d --build
+```
+
+This starts:
+- `db` (Postgres)
+- `api` (Django + Gunicorn + Stockfish)
+- `web` (Nginx serving React build and proxying `/api` to Django)
+
+App URL: `http://<your-host>`
+
+### 3. Start local-model serving (optional)
+
+If you want local models in production:
+
+```bash
+docker compose --env-file .env.production --profile local-llm up -d ollama
+```
+
+Then pull your model into Ollama:
+
+```bash
+docker exec -it $(docker compose --env-file .env.production ps -q ollama) ollama pull qwen3:8b
+```
+
+Set in `.env.production`:
+- `LOCAL_LLM_ENABLED=true`
+- `LOCAL_LLM_BASE_URL=http://ollama:11434`
+- `LLM_ALLOWED_MODELS_LOCAL=llama3.1:8b,qwen3:8b,qwen2.5:1.5b-instruct,llama3.2:1b`
+
+### 4. Production TLS
+
+Compose here binds plain HTTP on `WEB_PORT` (default `80`).  
+For internet-facing deploys, terminate TLS with Caddy/Nginx/Traefik in front and forward to this stack.
+
 ## LLM Configuration (Backend)
 
 The backend reads these environment variables from your shell:
@@ -73,7 +132,7 @@ The backend reads these environment variables from your shell:
 - `LLM_ALLOWED_MODELS_OPENAI` (CSV, default: `gpt-4.1-mini,gpt-4o-mini`)
 - `LLM_ALLOWED_MODELS_ANTHROPIC` (CSV, default: `claude-3-5-sonnet-latest,claude-3-5-haiku-latest`)
 - `LLM_ALLOWED_MODELS_GEMINI` (CSV, default: `gemini-1.5-pro,gemini-1.5-flash`)
-- `LLM_ALLOWED_MODELS_LOCAL` (CSV, default: `llama3.1:8b`)
+- `LLM_ALLOWED_MODELS_LOCAL` (CSV, default: `llama3.1:8b,qwen3:8b,qwen2.5:1.5b-instruct,llama3.2:1b`)
 - `LLM_ADVANCED_CUSTOM_MODEL_ENABLED` (default: `true`)
 - `LLM_MOVE_TIMEOUT_SECONDS` (default: `15`)
 - `ANALYSIS_FEATURE_ENABLED` (default: `true`)
@@ -92,7 +151,7 @@ export OPENAI_API_KEY=your_key_here
 export LLM_ALLOWED_MODELS_OPENAI=gpt-4.1-mini,gpt-4o-mini
 export LOCAL_LLM_ENABLED=true
 export LOCAL_LLM_BASE_URL=http://127.0.0.1:11434
-export LLM_ALLOWED_MODELS_LOCAL=llama3.1:8b
+export LLM_ALLOWED_MODELS_LOCAL=llama3.1:8b,qwen3:8b,qwen2.5:1.5b-instruct,llama3.2:1b
 export ANALYSIS_FEATURE_ENABLED=true
 export ANALYSIS_PROFILE_DEFAULT=balanced
 ```
@@ -132,7 +191,36 @@ Human vs LLM:
   "black_player_config": {
     "provider": "local",
     "model": "llama3.1:8b",
-    "custom_model": ""
+    "custom_model": "",
+    "ttc_policy": {
+      "name": "baseline"
+    }
+  }
+}
+```
+
+LLM vs LLM:
+
+```json
+{
+  "white_player_type": "llm",
+  "black_player_type": "llm",
+  "white_player_config": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "custom_model": "small-model-policy-a",
+    "ttc_policy": {
+      "name": "self_consistency",
+      "samples": 5
+    }
+  },
+  "black_player_config": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "custom_model": "large-model-baseline",
+    "ttc_policy": {
+      "name": "baseline"
+    }
   }
 }
 ```
@@ -149,6 +237,91 @@ Human vs LLM:
 
 If black is an AI player, the server makes the black move automatically after the white move.
 
+### Autoplay AI turns (for LLM vs LLM watching)
+
+`POST /api/games/{id}/autoplay/`
+
+```json
+{
+  "max_plies": 40
+}
+```
+
+Runs AI turns until game end, max plies reached, or a human turn is encountered.
+
+### Arena batch simulation
+
+`POST /api/arena/simulate/`
+
+Note: Arena endpoints currently support `local` provider only (Ollama) for both players and TTC auxiliary models.
+
+```json
+{
+  "num_games": 20,
+  "max_plies": 120,
+  "alternate_colors": true,
+  "player_a": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "custom_model": "small-model-ttc",
+    "ttc_policy": {
+      "name": "uncertainty_fallback",
+      "samples": 5,
+      "agreement_threshold": 0.7,
+      "fallback_provider": "openai",
+      "fallback_model": "gpt-4.1-mini"
+    }
+  },
+  "player_b": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "custom_model": "large-model-baseline",
+    "ttc_policy": {
+      "name": "baseline"
+    }
+  }
+}
+```
+
+Supported TTC policy names:
+- `baseline`
+- `self_consistency`
+- `verifier`
+- `uncertainty_fallback`
+
+### Persistent arena runs (for polling and dashboards)
+
+Create run:
+
+`POST /api/arena/runs/`
+
+```json
+{
+  "run_async": true,
+  "num_games": 20,
+  "max_plies": 120,
+  "alternate_colors": true,
+  "player_a": { "provider": "openai", "model": "gpt-4.1-mini", "custom_model": "", "ttc_policy": { "name": "baseline" } },
+  "player_b": { "provider": "openai", "model": "gpt-4.1-mini", "custom_model": "", "ttc_policy": { "name": "self_consistency", "samples": 5 } }
+}
+```
+
+List runs:
+
+`GET /api/arena/runs/?limit=20&include_games=0`
+
+Get run details:
+
+`GET /api/arena/runs/{run_id}/?include_games=1`
+
+Result payload includes:
+- W/L/D and win-rate score per side
+- avg attempts per move
+- fallback rate
+- avg move latency
+- estimated cost
+- run summary (avg plies, decisive rate, draw rate)
+
 ### Query AI options
 
 `GET /api/ai/options/`
@@ -161,7 +334,7 @@ Response:
     "openai": ["gpt-4.1-mini", "gpt-4o-mini"],
     "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
     "gemini": ["gemini-1.5-pro", "gemini-1.5-flash"],
-    "local": ["llama3.1:8b"]
+    "local": ["llama3.1:8b", "qwen3:8b", "qwen2.5:1.5b-instruct", "llama3.2:1b"]
   },
   "advanced_custom_model_enabled": true
 }
@@ -258,6 +431,14 @@ When FastAPI could make sense later:
 - sustained high analysis traffic,
 - need for a dedicated async analysis worker service,
 - desire to split analysis into an independently scalable API process.
+
+## Fine-Tuned Local Models Roadmap
+
+For your long-term model battle setup:
+- Keep self-host inference behind one local endpoint (`ollama` now, vLLM later if needed).
+- Register each fine-tuned model ID in `LLM_ALLOWED_MODELS_LOCAL`.
+- Add model-vs-model mode by extending `white_player_type`/`white_player_config` similarly to black.
+- Run automated match batches and compute Elo/Glicko from results.
 
 ## Tests
 

@@ -1,1 +1,8 @@
-python-chess
+Django==4.2.27
+djangorestframework==3.15.2
+django-cors-headers==4.6.0
+dj-database-url==2.3.0
+gunicorn==23.0.0
+psycopg2-binary==2.9.9
+python-chess==1.999
+whitenoise==6.8.2

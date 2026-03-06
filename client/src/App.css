@@ -17,6 +17,23 @@
   text-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 }
 
+.tab-strip {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.2rem;
+}
+
+.tab-button {
+  min-width: 140px;
+}
+
+.tab-button.active {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
 .game-layout {
   display: flex;
   gap: 2rem;
@@ -54,6 +71,103 @@
 
 .info-panel {
   min-width: 250px;
+}
+
+.arena-layout {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(270px, 330px) minmax(320px, 1fr) minmax(270px, 330px);
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.arena-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.arena-player-card {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  padding: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.arena-player-card h4 {
+  margin: 0;
+}
+
+.arena-player-card label,
+.arena-run-config label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.arena-provider-fixed {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 0.45rem 0.5rem;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d9eeff;
+  font-size: 0.88rem;
+}
+
+.arena-player-card select,
+.arena-player-card input,
+.arena-run-config input {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 0.45rem 0.5rem;
+  background: rgba(0, 0, 0, 0.2);
+  color: #fff;
+}
+
+.arena-run-config {
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.arena-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.arena-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.arena-board-shell {
+  width: 100%;
+  max-width: 460px;
+  margin: 0 auto;
+}
+
+.arena-live-panel {
+  overflow: hidden;
+}
+
+.arena-history {
+  max-height: 260px;
+}
+
+.arena-runs-list {
+  max-height: 240px;
+}
+
+.arena-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
 }
 
 .status {
@@ -400,12 +514,24 @@
     align-items: center;
   }
 
+  .arena-layout {
+    grid-template-columns: 1fr;
+  }
+
   .controls-panel,
   .info-panel {
     width: min(600px, 90vw);
   }
 
+  .arena-layout > .glass-panel {
+    width: min(700px, 90vw);
+  }
+
   .analysis-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .arena-metric-grid {
     grid-template-columns: 1fr;
   }
 }
