@@ -231,11 +231,11 @@ function App() {
   const [selectedModel, setSelectedModel] = useState('')
   const [customModelOverride, setCustomModelOverride] = useState('')
   const [aiOptionsError, setAiOptionsError] = useState(null)
-  const [activeTab, setActiveTab] = useState('play')
+  const [activeTab, setActiveTab] = useState('arena')
 
   const [arenaPlayerA, setArenaPlayerA] = useState(createArenaPlayer)
   const [arenaPlayerB, setArenaPlayerB] = useState(createArenaPlayer)
-  const [arenaNumGames, setArenaNumGames] = useState(20)
+  const [arenaNumGames, setArenaNumGames] = useState(5)
   const [arenaMaxPlies, setArenaMaxPlies] = useState(120)
   const [arenaAlternateColors, setArenaAlternateColors] = useState(true)
   const [arenaRunId, setArenaRunId] = useState(null)
@@ -243,7 +243,9 @@ function App() {
   const [arenaRunResult, setArenaRunResult] = useState(null)
   const [arenaRunError, setArenaRunError] = useState(null)
   const [arenaSubmitting, setArenaSubmitting] = useState(false)
+  const [arenaStopping, setArenaStopping] = useState(false)
   const [arenaRecentRuns, setArenaRecentRuns] = useState([])
+  const [selectedArenaCompletedGameIndex, setSelectedArenaCompletedGameIndex] = useState(null)
 
   const [liveArenaGame, setLiveArenaGame] = useState(new Chess())
   const [liveArenaFen, setLiveArenaFen] = useState(new Chess().fen())
@@ -599,6 +601,46 @@ function App() {
     }
   }
 
+  const previewArenaSnapshot = useCallback((snapshot, statusText) => {
+    const nextGame = createGameFromServer(snapshot)
+    setLiveArenaGame(nextGame)
+    setLiveArenaFen(nextGame.fen())
+    setLiveArenaGameId(null)
+    setLiveArenaAuto(false)
+    setLiveArenaError(null)
+    setLiveArenaStatus(statusText)
+  }, [])
+
+  const hydrateArenaRunPreview = useCallback((runId, runStatus, progress) => {
+    const currentGame = progress?.current_game
+    if (!currentGame) return
+
+    const completionText = `${progress.completed_games}/${progress.total_games}`
+    const winnerText = currentGame.is_game_over && currentGame.winner
+      ? ` Winner: ${currentGame.winner}.`
+      : ''
+
+    previewArenaSnapshot(
+      currentGame,
+      `Watching batch run #${runId} (${runStatus}): game ${currentGame.game_index} with ${currentGame.plies} plies, ${completionText} complete.${winnerText}`,
+    )
+  }, [previewArenaSnapshot])
+
+  const previewCompletedArenaGame = useCallback((runId, runStatus, gameData, totalGames, gameIndex) => {
+    if (!gameData?.fen && !gameData?.pgn) {
+      setLiveArenaError('Replay is unavailable for this older run. Start a new batch run to browse completed games.')
+      setLiveArenaStatus(`Run #${runId} does not include replay data for completed games.`)
+      return
+    }
+
+    const winnerText = gameData.winner ? ` Winner: ${gameData.winner}.` : ''
+    previewArenaSnapshot(
+      gameData,
+      `Viewing ${runStatus} run #${runId}: game ${gameData.game_index}/${totalGames} with ${gameData.plies} plies.${winnerText}`,
+    )
+    setSelectedArenaCompletedGameIndex(gameIndex)
+  }, [previewArenaSnapshot])
+
   const loadArenaRunDetail = async (runId, includeGames = false) => {
     const response = await axios.get(
       `${API_BASE}/arena/runs/${runId}/?include_games=${includeGames ? '1' : '0'}`,
@@ -607,6 +649,26 @@ function App() {
     setArenaRunStatus(payload.status || 'unknown')
     setArenaRunResult(payload.result || null)
     setArenaRunError(payload.error || null)
+    if (payload.status === 'completed' || payload.status === 'canceled') {
+      const games = payload.result?.games || []
+      if (games.length > 0) {
+        const fallbackIndex = games.length - 1
+        const nextIndex = payload.id === arenaRunId
+          && selectedArenaCompletedGameIndex != null
+          && selectedArenaCompletedGameIndex < games.length
+          ? selectedArenaCompletedGameIndex
+          : fallbackIndex
+        previewCompletedArenaGame(
+          payload.id,
+          payload.status || 'completed',
+          games[nextIndex],
+          games.length,
+          nextIndex,
+        )
+      }
+    } else if (payload.result?.progress?.current_game) {
+      hydrateArenaRunPreview(payload.id, payload.status || 'unknown', payload.result.progress)
+    }
     return payload
   }
 
@@ -625,6 +687,7 @@ function App() {
     setArenaRunError(null)
     setArenaRunResult(null)
     setArenaRunStatus('queued')
+    setSelectedArenaCompletedGameIndex(null)
 
     try {
       const payload = {
@@ -638,12 +701,31 @@ function App() {
       const response = await axios.post(`${API_BASE}/arena/runs/`, payload)
       setArenaRunId(response.data.id)
       setArenaRunStatus(response.data.status || 'queued')
+      await loadArenaRunDetail(response.data.id, false)
       await loadArenaRuns()
     } catch (error) {
       setArenaRunStatus('failed')
       setArenaRunError(error.response?.data?.error || 'Failed to start arena run.')
     } finally {
       setArenaSubmitting(false)
+    }
+  }
+
+  const handleStopArenaRun = async (runId = arenaRunId) => {
+    if (!runId) return
+
+    setArenaStopping(true)
+    setLiveArenaAuto(false)
+    try {
+      const response = await axios.post(`${API_BASE}/arena/runs/${runId}/`, {})
+      setArenaRunId(response.data.id)
+      setArenaRunStatus(response.data.status || 'canceled')
+      await loadArenaRunDetail(runId, true)
+      await loadArenaRuns()
+    } catch (error) {
+      setArenaRunError(error.response?.data?.error || 'Failed to stop arena run.')
+    } finally {
+      setArenaStopping(false)
     }
   }
 
@@ -741,7 +823,7 @@ function App() {
           arenaPollRef.current = null
         }
       }
-    }, 2000)
+    }, 1000)
 
     return () => {
       if (arenaPollRef.current) {
@@ -749,7 +831,13 @@ function App() {
         arenaPollRef.current = null
       }
     }
-  }, [arenaRunId, arenaRunStatus])
+  }, [
+    arenaRunId,
+    arenaRunStatus,
+    hydrateArenaRunPreview,
+    previewCompletedArenaGame,
+    selectedArenaCompletedGameIndex,
+  ])
 
   useEffect(() => {
     if (!liveArenaAuto || !liveArenaGameId) return
@@ -789,6 +877,11 @@ function App() {
 
     return rows
   }, [game])
+
+  const hasArenaRunMetrics = Boolean(
+    arenaRunResult?.player_a && arenaRunResult?.player_b && arenaRunResult?.summary,
+  )
+  const arenaProgress = arenaRunResult?.progress || null
 
   const positionStrength = useMemo(() => {
     const score = getMaterialScore(game)
@@ -1312,6 +1405,7 @@ function App() {
 
             <div className="status">
               Arena Run: {arenaRunId ? `#${arenaRunId} (${arenaRunStatus})` : 'none'}
+              {arenaProgress ? ` • ${arenaProgress.completed_games}/${arenaProgress.total_games} complete` : ''}
             </div>
             {localArenaModels.length === 0 ? (
               <div className="status error-status">No local Ollama models in server allowlist.</div>
@@ -1321,7 +1415,31 @@ function App() {
           </div>
 
           <div className="glass-panel arena-live-panel">
-            <h3>Live Arena</h3>
+            <h3>Watch Arena</h3>
+            <h4>Watch Batch Run</h4>
+            <div className="arena-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!arenaRunId) return
+                  void loadArenaRunDetail(
+                    arenaRunId,
+                    arenaRunStatus === 'completed' || arenaRunStatus === 'canceled',
+                  )
+                }}
+                disabled={!arenaRunId}
+              >
+                Watch Current Run
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleStopArenaRun()}
+                disabled={!arenaRunId || !['queued', 'running'].includes(arenaRunStatus) || arenaStopping}
+              >
+                {arenaStopping ? 'Stopping...' : 'Stop Run'}
+              </button>
+            </div>
+            <h4>Manual Live Match</h4>
             <div className="arena-actions">
               <button type="button" onClick={handleStartLiveArenaGame} disabled={liveArenaBusy || arenaSubmitting}>
                 Start Live Match
@@ -1364,7 +1482,24 @@ function App() {
 
           <div className="glass-panel arena-results-panel">
             <h3>Batch Results</h3>
-            {arenaRunResult ? (
+            {arenaProgress ? (
+              <div className="analysis-card">
+                <div className="analysis-card-title">Progress</div>
+                <div className="analysis-metric">
+                  Games complete: {arenaProgress.completed_games}/{arenaProgress.total_games}
+                </div>
+                <div className="analysis-metric">
+                  Percent complete: {percentText(arenaProgress.percent_complete)}
+                </div>
+                {arenaProgress.latest_game ? (
+                  <div className="analysis-metric">
+                    Latest game: #{arenaProgress.latest_game.game_index},{' '}
+                    {arenaProgress.latest_game.winner} in {arenaProgress.latest_game.plies} plies
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {hasArenaRunMetrics ? (
               <>
                 <div className="arena-metric-grid">
                   <div className="analysis-card">
@@ -1420,7 +1555,11 @@ function App() {
                 </div>
               </>
             ) : (
-              <div className="analysis-empty">No run result yet. Start a batch to generate metrics.</div>
+              <div className="analysis-empty">
+                {arenaRunId
+                  ? `Run #${arenaRunId} is ${arenaRunStatus}. Metrics will appear when the run completes.`
+                  : 'No run result yet. Start a batch to generate metrics.'}
+              </div>
             )}
 
             <h4>Recent Runs</h4>
@@ -1430,25 +1569,74 @@ function App() {
                   {arenaRecentRuns.map((run) => (
                     <tr key={`run-${run.id}`}>
                       <td className="move-num">#{run.id}</td>
-                      <td className="white-move">{run.status}</td>
+                      <td className="white-move">
+                        {run.status}
+                        {run.result?.progress && run.status !== 'completed'
+                          ? ` ${run.result.progress.completed_games}/${run.result.progress.total_games}`
+                          : ''}
+                      </td>
                       <td className="black-move">{run.config?.num_games || '-'}</td>
                       <td>
                         <button
                           type="button"
                           onClick={() => {
+                            setActiveTab('arena')
                             setArenaRunId(run.id)
                             setArenaRunStatus(run.status)
-                            void loadArenaRunDetail(run.id, run.status === 'completed')
+                            setSelectedArenaCompletedGameIndex(null)
+                            void loadArenaRunDetail(
+                              run.id,
+                              run.status === 'completed' || run.status === 'canceled',
+                            )
                           }}
                         >
-                          Open
+                          {run.status === 'completed' || run.status === 'canceled' ? 'Open' : 'Watch'}
                         </button>
+                        {run.status === 'queued' || run.status === 'running' ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleStopArenaRun(run.id)}
+                            disabled={arenaStopping}
+                          >
+                            Stop
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+            {Array.isArray(arenaRunResult?.games) && arenaRunResult.games.length > 0 ? (
+              <>
+                <h4>Completed Games</h4>
+                <div className="arena-game-grid">
+                  {arenaRunResult.games.map((gameRow, index) => (
+                    <button
+                      key={`arena-game-${gameRow.game_index}`}
+                      type="button"
+                      className={`arena-game-button ${selectedArenaCompletedGameIndex === index ? 'active' : ''}`}
+                      disabled={!gameRow.fen && !gameRow.pgn}
+                      onClick={() =>
+                        previewCompletedArenaGame(
+                          arenaRunId,
+                          arenaRunStatus,
+                          gameRow,
+                          arenaRunResult.games.length,
+                          index,
+                        )
+                      }
+                    >
+                      <span>Game {gameRow.game_index}</span>
+                      <small>
+                        {gameRow.winner || 'draw'} • {gameRow.plies} plies
+                        {!gameRow.fen && !gameRow.pgn ? ' • replay unavailable' : ''}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : null}
           </div>
         </div>
       )}

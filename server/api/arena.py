@@ -5,6 +5,12 @@ import chess
 from .players.llm_player import LLMPlayer
 
 
+class ArenaRunCanceled(Exception):
+    def __init__(self, partial_result):
+        super().__init__('Arena run canceled')
+        self.partial_result = partial_result
+
+
 def _estimate_cost_per_call_usd(provider, model):
     provider_key = (provider or '').strip().lower()
     model_key = (model or '').strip().lower()
@@ -38,15 +44,50 @@ class ArenaSimulationService:
     def __init__(self, build_llm_client):
         self.build_llm_client = build_llm_client
 
-    def run(self, *, player_a_config, player_b_config, num_games, max_plies, alternate_colors=True):
+    def run(
+        self,
+        *,
+        player_a_config,
+        player_b_config,
+        num_games,
+        max_plies,
+        alternate_colors=True,
+        progress_callback=None,
+        should_stop=None,
+    ):
         aggregate = {
             'player_a': self._init_player_stats(),
             'player_b': self._init_player_stats(),
             'games': [],
             'total_plies': 0,
         }
+        current_game = None
+
+        if progress_callback is not None:
+            progress_callback(
+                self._finalize_result(
+                    aggregate=aggregate,
+                    completed_games=0,
+                    total_games=num_games,
+                    max_plies=max_plies,
+                    alternate_colors=alternate_colors,
+                    current_game=None,
+                )
+            )
 
         for game_index in range(num_games):
+            if should_stop is not None and should_stop():
+                raise ArenaRunCanceled(
+                    self._finalize_result(
+                        aggregate=aggregate,
+                        completed_games=game_index,
+                        total_games=num_games,
+                        max_plies=max_plies,
+                        alternate_colors=alternate_colors,
+                        current_game=current_game,
+                    )
+                )
+
             if alternate_colors and game_index % 2 == 1:
                 white_label = 'player_b'
                 black_label = 'player_a'
@@ -58,13 +99,60 @@ class ArenaSimulationService:
                 white_config = player_a_config
                 black_config = player_b_config
 
+            if progress_callback is not None:
+                progress_callback(
+                    self._finalize_result(
+                        aggregate=aggregate,
+                        completed_games=game_index,
+                        total_games=num_games,
+                        max_plies=max_plies,
+                        alternate_colors=alternate_colors,
+                        current_game=self._serialize_current_game(
+                            board=chess.Board(),
+                            game_index=game_index + 1,
+                            white_label=white_label,
+                            black_label=black_label,
+                            pgn_text='',
+                            plies=0,
+                        ),
+                    )
+                )
+
             game_result = self._run_single_game(
                 white_config=white_config,
                 black_config=black_config,
                 white_label=white_label,
                 black_label=black_label,
+                game_index=game_index + 1,
                 max_plies=max_plies,
+                game_progress_callback=(
+                    (lambda current_game, completed_games=game_index: progress_callback(
+                        self._finalize_result(
+                            aggregate=aggregate,
+                            completed_games=completed_games,
+                            total_games=num_games,
+                            max_plies=max_plies,
+                            alternate_colors=alternate_colors,
+                            current_game=current_game,
+                        )
+                    ))
+                    if progress_callback is not None
+                    else None
+                ),
+                should_stop=should_stop,
             )
+            if game_result.get('canceled'):
+                raise ArenaRunCanceled(
+                    self._finalize_result(
+                        aggregate=aggregate,
+                        completed_games=game_index,
+                        total_games=num_games,
+                        max_plies=max_plies,
+                        alternate_colors=alternate_colors,
+                        current_game=game_result['current_game'],
+                    )
+                )
+            current_game = game_result['current_game']
 
             aggregate['games'].append(
                 {
@@ -74,6 +162,10 @@ class ArenaSimulationService:
                     'winner': game_result['winner'],
                     'plies': game_result['plies'],
                     'duration_ms': game_result['duration_ms'],
+                    'fen': current_game['fen'],
+                    'pgn': current_game['pgn'],
+                    'turn': current_game['turn'],
+                    'is_game_over': current_game['is_game_over'],
                     'white_move_stats': game_result['white_move_stats'],
                     'black_move_stats': game_result['black_move_stats'],
                 }
@@ -84,16 +176,42 @@ class ArenaSimulationService:
             self._apply_move_stats(aggregate[white_label], game_result['white_move_stats'])
             self._apply_move_stats(aggregate[black_label], game_result['black_move_stats'])
 
+            if progress_callback is not None:
+                progress_callback(
+                    self._finalize_result(
+                        aggregate=aggregate,
+                        completed_games=game_index + 1,
+                        total_games=num_games,
+                        max_plies=max_plies,
+                        alternate_colors=alternate_colors,
+                        current_game=current_game,
+                    )
+                )
+
         return self._finalize_result(
             aggregate=aggregate,
-            num_games=num_games,
+            completed_games=num_games,
+            total_games=num_games,
             max_plies=max_plies,
             alternate_colors=alternate_colors,
+            current_game=current_game,
         )
 
-    def _run_single_game(self, *, white_config, black_config, white_label, black_label, max_plies):
+    def _run_single_game(
+        self,
+        *,
+        white_config,
+        black_config,
+        white_label,
+        black_label,
+        game_index,
+        max_plies,
+        game_progress_callback=None,
+        should_stop=None,
+    ):
         board = chess.Board()
         plies = 0
+        pgn_text = ''
         started = time.monotonic()
 
         white_player = self._build_player(white_config, chess.WHITE)
@@ -103,6 +221,19 @@ class ArenaSimulationService:
         black_stats = self._init_game_move_stats(black_config)
 
         while not board.is_game_over(claim_draw=True) and plies < max_plies:
+            if should_stop is not None and should_stop():
+                return {
+                    'canceled': True,
+                    'current_game': self._serialize_current_game(
+                        board=board,
+                        game_index=game_index,
+                        white_label=white_label,
+                        black_label=black_label,
+                        pgn_text=pgn_text,
+                        plies=plies,
+                    ),
+                }
+
             player = white_player if board.turn == chess.WHITE else black_player
             stats = white_stats if board.turn == chess.WHITE else black_stats
 
@@ -113,9 +244,22 @@ class ArenaSimulationService:
             if move not in board.legal_moves:
                 break
 
+            pgn_text = self._append_san_to_pgn_text(pgn_text, board, move)
             board.push(move)
             plies += 1
             self._record_move_stats(stats, player, move_latency_ms)
+
+            if game_progress_callback is not None:
+                game_progress_callback(
+                    self._serialize_current_game(
+                        board=board,
+                        game_index=game_index,
+                        white_label=white_label,
+                        black_label=black_label,
+                        pgn_text=pgn_text,
+                        plies=plies,
+                    )
+                )
 
         winner = self._winner_from_board(board)
         if winner == 'white':
@@ -127,10 +271,19 @@ class ArenaSimulationService:
 
         duration_ms = int((time.monotonic() - started) * 1000)
         return {
+            'canceled': False,
             'winner': winner,
             'winner_label': winner_label,
             'plies': plies,
             'duration_ms': duration_ms,
+            'current_game': self._serialize_current_game(
+                board=board,
+                game_index=game_index,
+                white_label=white_label,
+                black_label=black_label,
+                pgn_text=pgn_text,
+                plies=plies,
+            ),
             'white_move_stats': self._finalize_game_move_stats(white_stats),
             'black_move_stats': self._finalize_game_move_stats(black_stats),
         }
@@ -251,22 +404,62 @@ class ArenaSimulationService:
         aggregate_player_stats['total_latency_ms'] += move_stats['avg_latency_ms'] * move_stats['moves']
         aggregate_player_stats['estimated_cost_usd'] += move_stats['estimated_cost_usd']
 
-    def _finalize_result(self, *, aggregate, num_games, max_plies, alternate_colors):
-        player_a = self._finalize_player_stats(aggregate['player_a'], num_games)
-        player_b = self._finalize_player_stats(aggregate['player_b'], num_games)
+    def _append_san_to_pgn_text(self, pgn_text, board, move):
+        san = board.san(move)
+        if board.turn == chess.WHITE:
+            return f'{pgn_text}{board.fullmove_number}. {san} '
+        return f'{pgn_text}{san} '
+
+    def _serialize_current_game(self, *, board, game_index, white_label, black_label, pgn_text, plies):
+        is_game_over = board.is_game_over(claim_draw=True)
+        winner = self._winner_from_board(board) if is_game_over else None
+        return {
+            'game_index': game_index,
+            'white': white_label,
+            'black': black_label,
+            'fen': board.fen(),
+            'pgn': pgn_text.strip(),
+            'plies': plies,
+            'turn': 'white' if board.turn == chess.WHITE else 'black',
+            'is_game_over': is_game_over,
+            'winner': winner,
+        }
+
+    def _finalize_result(self, *, aggregate, completed_games, total_games, max_plies, alternate_colors, current_game):
+        player_a = self._finalize_player_stats(aggregate['player_a'], completed_games)
+        player_b = self._finalize_player_stats(aggregate['player_b'], completed_games)
         decisive_games = player_a['wins'] + player_b['wins']
         draws = player_a['draws']
-        avg_plies = (aggregate['total_plies'] / num_games) if num_games else 0.0
+        avg_plies = (aggregate['total_plies'] / completed_games) if completed_games else 0.0
+        latest_game = aggregate['games'][-1] if aggregate['games'] else None
         return {
-            'num_games': num_games,
+            'num_games': total_games,
             'max_plies': max_plies,
             'alternate_colors': alternate_colors,
+            'progress': {
+                'completed_games': completed_games,
+                'total_games': total_games,
+                'remaining_games': max(total_games - completed_games, 0),
+                'percent_complete': _round4(completed_games / total_games) if total_games else 0.0,
+                'is_complete': completed_games >= total_games if total_games else True,
+                'current_game': current_game,
+                'latest_game': (
+                    {
+                        'game_index': latest_game['game_index'],
+                        'winner': latest_game['winner'],
+                        'plies': latest_game['plies'],
+                        'duration_ms': latest_game['duration_ms'],
+                    }
+                    if latest_game
+                    else None
+                ),
+            },
             'player_a': player_a,
             'player_b': player_b,
             'summary': {
                 'avg_plies': _round4(avg_plies),
-                'decisive_rate': _round4(decisive_games / num_games) if num_games else 0.0,
-                'draw_rate': _round4(draws / num_games) if num_games else 0.0,
+                'decisive_rate': _round4(decisive_games / completed_games) if completed_games else 0.0,
+                'draw_rate': _round4(draws / completed_games) if completed_games else 0.0,
             },
             'games': aggregate['games'],
         }

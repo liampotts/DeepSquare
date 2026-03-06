@@ -17,6 +17,7 @@ from .serializers import (
     MoveSerializer,
 )
 from .arena import ArenaSimulationService
+from .arena import ArenaRunCanceled
 import chess
 from .players.stockfish_player import StockfishPlayer
 from .players.llm_player import LLMPlayer
@@ -81,6 +82,8 @@ def compact_arena_result(result, include_games=False):
 
 def process_arena_run(run_id):
     run = ArenaRun.objects.get(pk=run_id)
+    if run.status == ArenaRun.STATUS_CANCELED:
+        return
     run.status = ArenaRun.STATUS_RUNNING
     run.started_at = timezone.now()
     run.error = ''
@@ -90,15 +93,32 @@ def process_arena_run(run_id):
     service = ArenaSimulationService(build_llm_client=build_llm_client)
 
     try:
+        def save_progress(progress_result):
+            ArenaRun.objects.filter(pk=run_id).update(
+                result=progress_result,
+                updated_at=timezone.now(),
+            )
+
+        def should_stop():
+            return ArenaRun.objects.filter(pk=run_id, status=ArenaRun.STATUS_CANCELED).exists()
+
         result = service.run(
             player_a_config=config['player_a'],
             player_b_config=config['player_b'],
             num_games=config['num_games'],
             max_plies=config['max_plies'],
             alternate_colors=config['alternate_colors'],
+            progress_callback=save_progress,
+            should_stop=should_stop,
         )
         run.result = result
         run.status = ArenaRun.STATUS_COMPLETED
+        run.finished_at = timezone.now()
+        run.save(update_fields=['result', 'status', 'finished_at', 'updated_at'])
+    except ArenaRunCanceled as exc:
+        logger.info('arena_run_canceled id=%s', run_id)
+        run.result = exc.partial_result
+        run.status = ArenaRun.STATUS_CANCELED
         run.finished_at = timezone.now()
         run.save(update_fields=['result', 'status', 'finished_at', 'updated_at'])
     except Exception as exc:
@@ -487,4 +507,29 @@ class ArenaRunDetailView(APIView):
             )
         payload = ArenaRunSerializer(run).data
         payload['result'] = compact_arena_result(payload.get('result'), include_games=include_games)
+        return Response(payload)
+
+    def post(self, request, run_id):
+        run = ArenaRun.objects.filter(pk=run_id).first()
+        if run is None:
+            return Response(
+                {'error': 'Arena run not found', 'code': 'arena_run_not_found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if run.status not in {ArenaRun.STATUS_QUEUED, ArenaRun.STATUS_RUNNING}:
+            return Response(
+                {'error': 'Arena run is not active', 'code': 'arena_run_not_active'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        update_fields = ['status', 'updated_at']
+        run.status = ArenaRun.STATUS_CANCELED
+        if run.started_at is None:
+            run.finished_at = timezone.now()
+            update_fields.append('finished_at')
+        run.save(update_fields=update_fields)
+
+        payload = ArenaRunSerializer(run).data
+        payload['result'] = compact_arena_result(payload.get('result'), include_games=False)
         return Response(payload)

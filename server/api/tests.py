@@ -457,6 +457,9 @@ class GameApiTests(APITestCase):
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(create_response.data['status'], 'completed')
         self.assertNotIn('games', create_response.data['result'])
+        self.assertEqual(create_response.data['result']['progress']['completed_games'], 4)
+        self.assertEqual(create_response.data['result']['progress']['total_games'], 4)
+        self.assertEqual(create_response.data['result']['progress']['percent_complete'], 1.0)
 
         detail_response = self.client.get(
             reverse('arena-run-detail', kwargs={'run_id': create_response.data['id']}) + '?include_games=1'
@@ -464,7 +467,10 @@ class GameApiTests(APITestCase):
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_response.data['status'], 'completed')
         self.assertEqual(detail_response.data['result']['num_games'], 4)
+        self.assertEqual(detail_response.data['result']['progress']['completed_games'], 4)
         self.assertEqual(len(detail_response.data['result']['games']), 4)
+        self.assertIn('pgn', detail_response.data['result']['games'][0])
+        self.assertIn('fen', detail_response.data['result']['games'][0])
 
     def test_arena_rejects_non_local_provider(self):
         payload = {
@@ -515,6 +521,32 @@ class GameApiTests(APITestCase):
         missing_response = self.client.get(reverse('arena-run-detail', kwargs={'run_id': 999999}))
         self.assertEqual(missing_response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(missing_response.data['code'], 'arena_run_not_found')
+
+    def test_arena_run_can_be_canceled(self):
+        run = ArenaRun.objects.create(
+            status='running',
+            config={'num_games': 5},
+            result={
+                'progress': {
+                    'completed_games': 1,
+                    'total_games': 5,
+                }
+            },
+        )
+
+        response = self.client.post(reverse('arena-run-detail', kwargs={'run_id': run.id}), {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'canceled')
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, ArenaRun.STATUS_CANCELED)
+
+    def test_cancel_rejects_inactive_run(self):
+        run = ArenaRun.objects.create(status='completed', config={'num_games': 1}, result={'num_games': 1})
+
+        response = self.client.post(reverse('arena-run-detail', kwargs={'run_id': run.id}), {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['code'], 'arena_run_not_active')
 
     @patch('api.views.GameAnalysisService.analyze_game')
     def test_analysis_happy_path_returns_expected_shape(self, analyze_mock):

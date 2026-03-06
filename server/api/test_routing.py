@@ -4,7 +4,7 @@ from unittest.mock import patch
 import chess
 from django.test import SimpleTestCase
 
-from .arena import ArenaSimulationService
+from .arena import ArenaRunCanceled, ArenaSimulationService
 from .players.ttc_policy import TTCPolicyEngine
 
 
@@ -201,3 +201,91 @@ class ArenaSimulationServiceTests(SimpleTestCase):
         self.assertEqual(result['games'][1]['black'], 'player_a')
         self.assertEqual(result['player_a']['moves_played'], 2)
         self.assertEqual(result['player_b']['moves_played'], 2)
+
+    def test_run_reports_progress_snapshots(self):
+        progress_updates = []
+
+        def build_llm_client(provider, model):
+            return FirstLegalClient()
+
+        service = ArenaSimulationService(build_llm_client=build_llm_client)
+        player_a = self._config(
+            provider='local',
+            model='llama3.1:8b',
+            custom_model='player-a',
+            ttc_policy={'name': 'baseline'},
+        )
+        player_b = self._config(
+            provider='local',
+            model='qwen3:8b',
+            custom_model='player-b',
+            ttc_policy={'name': 'baseline'},
+        )
+
+        result = service.run(
+            player_a_config=player_a,
+            player_b_config=player_b,
+            num_games=2,
+            max_plies=2,
+            alternate_colors=False,
+            progress_callback=lambda snapshot: progress_updates.append(snapshot),
+        )
+
+        self.assertEqual(progress_updates[0]['progress']['completed_games'], 0)
+        self.assertIsNone(progress_updates[0]['progress']['current_game'])
+        self.assertEqual(progress_updates[-1]['progress']['completed_games'], 2)
+        self.assertEqual(progress_updates[-1]['progress']['percent_complete'], 1.0)
+        self.assertTrue(progress_updates[-1]['progress']['is_complete'])
+        self.assertEqual(progress_updates[-1]['progress']['current_game']['game_index'], 2)
+        self.assertEqual(progress_updates[-1]['progress']['current_game']['plies'], 2)
+        self.assertTrue(
+            any(
+                snapshot['progress']['current_game']
+                and snapshot['progress']['current_game']['game_index'] == 1
+                and snapshot['progress']['current_game']['plies'] == 1
+                for snapshot in progress_updates
+            )
+        )
+        self.assertEqual(result['progress']['completed_games'], 2)
+        self.assertEqual(result['progress']['total_games'], 2)
+
+    def test_run_can_be_canceled_mid_game(self):
+        progress_updates = []
+        stop_checks = {'count': 0}
+
+        def build_llm_client(provider, model):
+            return FirstLegalClient()
+
+        def should_stop():
+            stop_checks['count'] += 1
+            return stop_checks['count'] >= 3
+
+        service = ArenaSimulationService(build_llm_client=build_llm_client)
+        player_a = self._config(
+            provider='local',
+            model='llama3.1:8b',
+            custom_model='player-a',
+            ttc_policy={'name': 'baseline'},
+        )
+        player_b = self._config(
+            provider='local',
+            model='qwen3:8b',
+            custom_model='player-b',
+            ttc_policy={'name': 'baseline'},
+        )
+
+        with self.assertRaises(ArenaRunCanceled) as exc:
+            service.run(
+                player_a_config=player_a,
+                player_b_config=player_b,
+                num_games=2,
+                max_plies=4,
+                alternate_colors=False,
+                progress_callback=lambda snapshot: progress_updates.append(snapshot),
+                should_stop=should_stop,
+            )
+
+        self.assertEqual(exc.exception.partial_result['progress']['completed_games'], 0)
+        self.assertEqual(exc.exception.partial_result['progress']['current_game']['plies'], 1)
+        self.assertFalse(exc.exception.partial_result['progress']['is_complete'])
+        self.assertTrue(progress_updates)

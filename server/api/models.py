@@ -31,12 +31,14 @@ class ArenaRun(models.Model):
     STATUS_QUEUED = 'queued'
     STATUS_RUNNING = 'running'
     STATUS_COMPLETED = 'completed'
+    STATUS_CANCELED = 'canceled'
     STATUS_FAILED = 'failed'
 
     STATUS_CHOICES = (
         (STATUS_QUEUED, 'Queued'),
         (STATUS_RUNNING, 'Running'),
         (STATUS_COMPLETED, 'Completed'),
+        (STATUS_CANCELED, 'Canceled'),
         (STATUS_FAILED, 'Failed'),
     )
 
